@@ -54,25 +54,56 @@ class DuplicateDetector:
         self._collection_cache: dict[str, object] = {}
 
     def _get_collection(self, workspace: str,
-                         repo_slug: str) -> Optional[object]:
+                         repo_slug: str,
+                         branch: str = "") -> Optional[object]:
+        """
+        Load the ChromaDB collection for the given branch.
+        Falls back to the legacy (no-branch) collection when no branch-specific
+        collection exists yet — so existing repos keep working.
+        """
+        from embeddings.indexer import collection_exists, get_collection
+
+        # Prefer the branch-specific collection when it's available
+        if branch and collection_exists(workspace, repo_slug, branch):
+            key = f"{workspace}/{repo_slug}/{branch}"
+            if key in self._collection_cache:
+                return self._collection_cache[key]
+            try:
+                col = get_collection(workspace, repo_slug,
+                                     self.settings.openai_api_key,
+                                     branch=branch)
+                self._collection_cache[key] = col
+                return col
+            except Exception as exc:
+                logger.warning("Could not load branch collection %s: %s", key, exc)
+
+        # Fallback: legacy no-branch collection
         key = f"{workspace}/{repo_slug}"
-        if key in self._collection_cache:
-            return self._collection_cache[key]
-        try:
-            from embeddings.indexer import get_collection
-            col = get_collection(workspace, repo_slug,
-                                  self.settings.openai_api_key)
-            self._collection_cache[key] = col
-            return col
-        except Exception as exc:
-            logger.warning("Could not load collection for %s: %s", key, exc)
-            return None
+        if key not in self._collection_cache:
+            try:
+                col = get_collection(workspace, repo_slug,
+                                     self.settings.openai_api_key)
+                self._collection_cache[key] = col
+            except Exception as exc:
+                logger.warning("Could not load collection for %s: %s", key, exc)
+                return None
+
+        if branch and key in self._collection_cache:
+            logger.warning(
+                "PR targets branch '%s' but no branch-specific index found. "
+                "Duplicate detection uses the default index — results may miss "
+                "code that exists in '%s' but not in the default branch. "
+                "Run 'Build Index' for branch '%s' to fix this.",
+                branch, branch, branch,
+            )
+        return self._collection_cache.get(key)
 
     def detect(
         self,
         workspace: str,
         repo_slug: str,
         file_contents: dict[str, str],
+        target_branch: str = "",
     ) -> list[DuplicateWarning]:
         """
         file_contents: {filepath: source_code} for PR-changed files.
@@ -82,7 +113,7 @@ class DuplicateDetector:
             logger.debug("No OPENAI_API_KEY — skipping duplicate detection")
             return []
 
-        collection = self._get_collection(workspace, repo_slug)
+        collection = self._get_collection(workspace, repo_slug, target_branch)
         if collection is None:
             return []
 

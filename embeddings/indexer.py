@@ -1,12 +1,8 @@
 """
-Repo Indexer — builds a ChromaDB vector index for a Bitbucket repository.
+Repo Indexer — builds a ChromaDB vector index by reading the local sparse clone.
 
-Usage:
-    indexer = RepoIndexer(settings)
-    indexer.index_repo(workspace, repo_slug, progress_callback=None)
-
-The index is stored under  data/chroma/<workspace>_<repo_slug>/
-Each document is a code chunk (function / class / block).
+Provider-agnostic: reads files from data/clones/<workspace>_<repo>/
+instead of calling any provider API.
 """
 
 from __future__ import annotations
@@ -19,43 +15,48 @@ from typing import Callable, Optional
 import chromadb
 from chromadb.utils import embedding_functions
 
-from bitbucket.client import BitbucketClient
 from config.settings import Settings
 from embeddings.chunker import chunk_file, LANG_MAP
+from repos.cloner import clone_dir
 
 logger = logging.getLogger(__name__)
 
-# Source file extensions we care about
-SOURCE_EXTENSIONS = set(LANG_MAP.keys()) | {".go", ".java", ".rb", ".rs",
-                                              ".cpp", ".c", ".cs", ".php",
-                                              ".swift", ".kt"}
+SOURCE_EXTENSIONS = set(LANG_MAP.keys()) | {
+    ".go", ".java", ".rb", ".rs", ".cpp", ".c",
+    ".cs", ".php", ".swift", ".kt",
+}
 
 CHROMA_BASE = Path("data/chroma")
 
 
-def _collection_name(workspace: str, repo_slug: str) -> str:
-    # ChromaDB collection names must match [a-zA-Z0-9_-]{3,63}
-    raw = f"{workspace}_{repo_slug}"
+def _collection_name(workspace: str, repo_slug: str, branch: str = "") -> str:
+    """
+    Each branch gets its own collection so develop and stage embeddings
+    never collide. Default (no branch) preserves backward-compat naming.
+    """
+    raw = f"{workspace}_{repo_slug}" + (f"__{branch}" if branch else "")
     name = re.sub(r"[^a-zA-Z0-9_-]", "_", raw)[:63]
-    if len(name) < 3:
-        name = name + "_col"
-    return name
+    return name if len(name) >= 3 else name + "_col"
 
 
-def get_chroma_client(workspace: str, repo_slug: str) -> chromadb.ClientAPI:
-    path = CHROMA_BASE / f"{workspace}_{repo_slug}"
+def get_chroma_client(workspace: str, repo_slug: str,
+                       branch: str = "") -> chromadb.ClientAPI:
+    suffix = f"__{branch}" if branch else ""
+    path = CHROMA_BASE / f"{workspace}_{repo_slug}{suffix}"
     path.mkdir(parents=True, exist_ok=True)
     return chromadb.PersistentClient(path=str(path))
 
 
 def get_collection(workspace: str, repo_slug: str,
-                   openai_api_key: str) -> chromadb.Collection:
-    client = get_chroma_client(workspace, repo_slug)
+                   openai_api_key: str,
+                   branch: str = "") -> chromadb.Collection:
+    """Return (or create) the ChromaDB collection for a specific branch."""
+    client = get_chroma_client(workspace, repo_slug, branch)
     ef = embedding_functions.OpenAIEmbeddingFunction(
         api_key=openai_api_key,
         model_name="text-embedding-3-small",
     )
-    name = _collection_name(workspace, repo_slug)
+    name = _collection_name(workspace, repo_slug, branch)
     return client.get_or_create_collection(
         name=name,
         embedding_function=ef,
@@ -63,59 +64,43 @@ def get_collection(workspace: str, repo_slug: str,
     )
 
 
+def collection_exists(workspace: str, repo_slug: str,
+                       branch: str = "") -> bool:
+    """Return True if a non-empty ChromaDB collection exists for this branch."""
+    suffix = f"__{branch}" if branch else ""
+    path = CHROMA_BASE / f"{workspace}_{repo_slug}{suffix}"
+    return path.exists() and any(path.iterdir())
+
+
 class RepoIndexer:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.client = BitbucketClient(settings)
 
-    def _list_source_files(self, workspace: str,
-                            repo_slug: str) -> list[str]:
-        """Return all source file paths on the main/master branch."""
-        base = self.settings.bitbucket_base_url.rstrip("/")
-        # Try main then master
-        for branch in ("main", "master", "develop"):
-            url = (f"{base}/repositories/{workspace}/{repo_slug}"
-                   f"/src/{branch}/")
-            paths: list[str] = []
-            self._walk_tree(url, paths, workspace, repo_slug, branch)
-            if paths:
-                return paths
-        return []
-
-    def _walk_tree(self, url: str, paths: list[str],
-                   workspace: str, repo_slug: str, branch: str,
-                   depth: int = 0) -> None:
-        if depth > 10:
-            return
-        try:
-            data = self.client._get_paginated(url, max_items=500)
-        except Exception as exc:
-            logger.debug("Could not list %s: %s", url, exc)
-            return
-
-        base = self.settings.bitbucket_base_url.rstrip("/")
-        for item in data:
-            if item.get("type") == "commit_file":
-                fp = item.get("path", "")
-                ext = Path(fp).suffix.lower()
-                if ext in SOURCE_EXTENSIONS:
-                    paths.append(fp)
-            elif item.get("type") == "commit_directory":
-                sub_url = (f"{base}/repositories/{workspace}/{repo_slug}"
-                           f"/src/{branch}/{item['path']}/")
-                self._walk_tree(sub_url, paths, workspace, repo_slug,
-                                branch, depth + 1)
+    def _list_source_files(self, clone_path: Path) -> list[Path]:
+        """Walk the local clone and return all source files."""
+        files = []
+        for path in clone_path.rglob("*"):
+            if not path.is_file():
+                continue
+            # Skip .git internals
+            if ".git" in path.parts:
+                continue
+            if path.suffix.lower() in SOURCE_EXTENSIONS:
+                files.append(path)
+        return files
 
     def index_repo(
         self,
         workspace: str,
         repo_slug: str,
+        branch: str = "",
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> int:
         """
-        Index all source files in the repo.
-        Returns the total number of chunks indexed.
-        progress_callback(percent: int, message: str)
+        Index all source files from the local sparse clone.
+        `branch` scopes the clone path and ChromaDB collection so that
+        develop and stage never share the same index.
+        Returns total number of chunks indexed.
         """
         if not self.settings.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required for repo indexing")
@@ -125,48 +110,53 @@ class RepoIndexer:
                 progress_callback(pct, msg)
             logger.info("[%d%%] %s", pct, msg)
 
-        _prog(2, "Listing source files...")
-        file_paths = self._list_source_files(workspace, repo_slug)
-        if not file_paths:
+        clone_path = clone_dir(workspace, repo_slug, branch)
+        if not clone_path.exists():
+            # Fall back to legacy (no-branch) path for backward compat
+            clone_path = clone_dir(workspace, repo_slug)
+        if not clone_path.exists():
             raise ValueError(
-                f"No source files found in {workspace}/{repo_slug}. "
-                "Check credentials and repo path."
+                f"No local clone found at {clone_path}. "
+                "Run 'Build Index' to clone the repo first."
             )
 
-        _prog(5, f"Found {len(file_paths)} source files. Fetching content...")
+        _prog(2, "Scanning local clone for source files…")
+        source_files = self._list_source_files(clone_path)
+        if not source_files:
+            raise ValueError(
+                f"No source files found in local clone at {clone_path}. "
+                "The clone may be empty or only contain excluded file types."
+            )
+
+        _prog(5, f"Found {len(source_files)} source files. Building embeddings…")
 
         collection = get_collection(workspace, repo_slug,
-                                    self.settings.openai_api_key)
+                                    self.settings.openai_api_key,
+                                    branch=branch)
 
-        # Get the current head commit for all files
-        base = self.settings.bitbucket_base_url.rstrip("/")
-        head = self._get_head_commit(workspace, repo_slug)
-
-        total = len(file_paths)
+        total = len(source_files)
         indexed_chunks = 0
         batch_docs: list[str] = []
         batch_ids: list[str] = []
         batch_metas: list[dict] = []
-        BATCH_SIZE = 50  # embed 50 chunks at a time
+        BATCH_SIZE = 50
 
-        for file_idx, filepath in enumerate(file_paths):
+        for file_idx, abs_path in enumerate(source_files):
             pct = 5 + int(90 * file_idx / total)
-            _prog(pct, f"Processing {filepath} ({file_idx+1}/{total})")
+            rel_path = str(abs_path.relative_to(clone_path))
+            _prog(pct, f"Processing {rel_path} ({file_idx + 1}/{total})")
 
             try:
-                content = self.client.get_file_content(
-                    workspace, repo_slug, head, filepath
-                )
+                content = abs_path.read_text(encoding="utf-8", errors="replace")
             except Exception:
-                logger.debug("Skipping %s — could not fetch", filepath)
+                logger.debug("Skipping %s — could not read", rel_path)
                 continue
 
-            if not content or not content.strip():
+            if not content.strip():
                 continue
 
-            chunks = chunk_file(filepath, content)
+            chunks = chunk_file(rel_path, content)
             for chunk in chunks:
-                # Use scoped chunk_id to avoid collisions across repos
                 cid = f"{workspace}/{repo_slug}:{chunk['chunk_id']}"
                 batch_ids.append(cid)
                 batch_docs.append(chunk["code"])
@@ -188,7 +178,6 @@ class RepoIndexer:
                     indexed_chunks += len(batch_ids)
                     batch_ids, batch_docs, batch_metas = [], [], []
 
-        # Flush remaining
         if batch_ids:
             collection.upsert(
                 ids=batch_ids,
@@ -199,16 +188,3 @@ class RepoIndexer:
 
         _prog(100, f"Done. Indexed {indexed_chunks} chunks.")
         return indexed_chunks
-
-    def _get_head_commit(self, workspace: str, repo_slug: str) -> str:
-        base = self.settings.bitbucket_base_url.rstrip("/")
-        for branch in ("main", "master", "develop"):
-            try:
-                data = self.client._get(
-                    f"{base}/repositories/{workspace}/{repo_slug}"
-                    f"/refs/branches/{branch}"
-                )
-                return data["target"]["hash"]
-            except Exception:
-                continue
-        return "HEAD"

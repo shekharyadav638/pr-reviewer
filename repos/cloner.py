@@ -18,8 +18,6 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
-from urllib.parse import urlparse, urlunparse
-
 logger = logging.getLogger(__name__)
 
 CLONE_BASE = Path("data/clones")
@@ -57,20 +55,18 @@ SPARSE_EXCLUDE = [
 ]
 
 
-def clone_dir(workspace: str, repo_slug: str) -> Path:
+def clone_dir(workspace: str, repo_slug: str, branch: str = "") -> Path:
+    """
+    Return the local clone path.
+    If `branch` is given, the path is branch-specific so that develop and stage
+    clones coexist independently under data/clones/.
+    Default (no branch) keeps the original path for backward compatibility.
+    """
     safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", f"{workspace}_{repo_slug}")
+    if branch:
+        safe_branch = re.sub(r"[^a-zA-Z0-9_.-]", "_", branch)
+        return CLONE_BASE / f"{safe}__{safe_branch}"
     return CLONE_BASE / safe
-
-
-def _inject_credentials(git_url: str, username: str, password: str) -> str:
-    """Inject basic-auth credentials into an https:// URL."""
-    parsed = urlparse(git_url)
-    if parsed.scheme in ("http", "https") and username and password:
-        netloc = f"{username}:{password}@{parsed.hostname}"
-        if parsed.port:
-            netloc += f":{parsed.port}"
-        return urlunparse(parsed._replace(netloc=netloc))
-    return git_url
 
 
 def _run(cmd: list[str], cwd: Optional[Path] = None,
@@ -95,8 +91,19 @@ class RepoCloner:
         self.password = password
         self.ssh_key_path = ssh_key_path
 
-    def _auth_url(self, git_url: str) -> str:
-        return _inject_credentials(git_url, self.username, self.password)
+    def _inject_auth(self, git_url: str) -> str:
+        """Embed username:password into the HTTPS URL so git never prompts."""
+        if not (self.username and self.password):
+            return git_url
+        from urllib.parse import urlparse, urlunparse, quote
+        p = urlparse(git_url)
+        if p.scheme not in ("http", "https"):
+            return git_url
+        user = quote(self.username, safe="")
+        pwd  = quote(self.password, safe="")
+        authed = p._replace(netloc=f"{user}:{pwd}@{p.hostname}"
+                            + (f":{p.port}" if p.port else ""))
+        return urlunparse(authed)
 
     def _git_env(self) -> dict:
         env = {}
@@ -115,11 +122,14 @@ class RepoCloner:
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> Path:
         """
-        Sparse shallow clone of git_url into data/clones/<workspace>_<repo>/.
-        Returns the clone path.
+        Sparse shallow clone of git_url into a branch-scoped directory.
+        Cloning develop → data/clones/ws_repo__develop/
+        Cloning stage   → data/clones/ws_repo__stage/
+        This keeps the two branches' codebases fully separate so duplicate
+        detection and graph analysis always query the right codebase.
         """
-        dest = clone_dir(workspace, repo_slug)
-        auth_url = self._auth_url(git_url)
+        dest = clone_dir(workspace, repo_slug, branch)
+        authed_url = self._inject_auth(git_url)
         env = self._git_env()
 
         def _prog(pct: int, msg: str):
@@ -129,7 +139,7 @@ class RepoCloner:
 
         if dest.exists():
             _prog(5, f"Clone already exists at {dest}, pulling latest…")
-            self._pull(dest, branch, env, _prog)
+            self._pull(dest, branch, authed_url, env, _prog)
             return dest
 
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +156,7 @@ class RepoCloner:
         ]
         if branch:
             cmd += ["--branch", branch]
-        cmd += [auth_url, str(dest)]
+        cmd += [authed_url, str(dest)]
         _run(cmd, env=env)
         _prog(40, "Clone complete, configuring sparse checkout…")
 
@@ -187,17 +197,19 @@ class RepoCloner:
         except Exception:
             pass  # gc is best-effort
 
-    def _pull(self, dest: Path, branch: str, env: dict,
+    def _pull(self, dest: Path, branch: str, authed_url: str, env: dict,
               progress_callback: Callable) -> None:
         """Update an existing clone to latest."""
         progress_callback(10, "Fetching latest changes…")
         try:
-            fetch_cmd = ["git", "fetch", "--depth", "1", "--no-tags", "origin"]
+            # Use the authed URL as the remote so credentials are embedded
+            fetch_cmd = ["git", "fetch", "--depth", "1", "--no-tags"]
+            fetch_cmd += [authed_url]
             if branch:
                 fetch_cmd.append(branch)
             _run(fetch_cmd, cwd=dest, env=env)
 
-            reset_ref = f"origin/{branch}" if branch else "origin/HEAD"
+            reset_ref = f"FETCH_HEAD"
             _run(["git", "reset", "--hard", reset_ref], cwd=dest, env=env)
             progress_callback(100, "Sync complete.")
         except Exception as exc:
@@ -212,8 +224,8 @@ class RepoCloner:
         git_url: str = "",
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> Path:
-        """Pull latest for an already-cloned repo."""
-        dest = clone_dir(workspace, repo_slug)
+        """Pull latest for an already-cloned repo (branch-scoped path)."""
+        dest = clone_dir(workspace, repo_slug, branch)
         env = self._git_env()
 
         def _prog(pct: int, msg: str):
@@ -226,7 +238,8 @@ class RepoCloner:
                 raise ValueError(f"Repo not cloned yet and no git_url provided")
             return self.clone(git_url, workspace, repo_slug, branch, progress_callback)
 
-        self._pull(dest, branch, env, _prog)
+        authed_url = self._inject_auth(git_url) if git_url else ""
+        self._pull(dest, branch, authed_url, env, _prog)
         return dest
 
     def list_branches(self, workspace: str, repo_slug: str) -> list[str]:
@@ -257,18 +270,21 @@ class RepoCloner:
             return ""
 
     def checkout_branch(self, workspace: str, repo_slug: str,
-                        branch: str) -> None:
+                        branch: str, git_url: str = "") -> None:
         dest = clone_dir(workspace, repo_slug)
         env = self._git_env()
+        authed_url = self._inject_auth(git_url) if git_url else "origin"
         _run(["git", "fetch", "--depth", "1", "--no-tags",
-               "origin", branch], cwd=dest, env=env)
+               authed_url, branch], cwd=dest, env=env)
         _run(["git", "checkout", "-B", branch,
-               f"origin/{branch}"], cwd=dest, env=env)
+               "FETCH_HEAD"], cwd=dest, env=env)
 
     def browse(self, workspace: str, repo_slug: str,
-               path: str = "") -> list[dict]:
-        """List files/dirs at path inside the clone."""
-        dest = clone_dir(workspace, repo_slug)
+               path: str = "", branch: str = "") -> list[dict]:
+        """List files/dirs at path inside the branch-specific clone."""
+        dest = clone_dir(workspace, repo_slug, branch)
+        if not dest.exists():
+            dest = clone_dir(workspace, repo_slug)  # legacy fallback
         target = dest / path if path else dest
         if not target.exists():
             return []
@@ -287,9 +303,11 @@ class RepoCloner:
         return items
 
     def read_file(self, workspace: str, repo_slug: str,
-                  path: str) -> str:
-        """Read a source file from the clone."""
-        dest = clone_dir(workspace, repo_slug)
+                  path: str, branch: str = "") -> str:
+        """Read a source file from the branch-specific clone."""
+        dest = clone_dir(workspace, repo_slug, branch)
+        if not dest.exists():
+            dest = clone_dir(workspace, repo_slug)  # legacy fallback
         target = dest / path
         if not target.exists() or not target.is_file():
             raise FileNotFoundError(f"{path} not found in clone")
@@ -301,16 +319,22 @@ class RepoCloner:
         except Exception as e:
             raise IOError(f"Cannot read {path}: {e}")
 
-    def disk_usage_mb(self, workspace: str, repo_slug: str) -> float:
-        dest = clone_dir(workspace, repo_slug)
+    def disk_usage_mb(self, workspace: str, repo_slug: str,
+                      branch: str = "") -> float:
+        dest = clone_dir(workspace, repo_slug, branch)
+        if not dest.exists():
+            dest = clone_dir(workspace, repo_slug)   # legacy fallback
         if not dest.exists():
             return 0.0
         total = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
         return round(total / (1024 * 1024), 2)
 
-    def delete_clone(self, workspace: str, repo_slug: str) -> None:
+    def delete_clone(self, workspace: str, repo_slug: str,
+                     branch: str = "") -> None:
         import shutil
-        dest = clone_dir(workspace, repo_slug)
+        dest = clone_dir(workspace, repo_slug, branch)
+        if not dest.exists():
+            dest = clone_dir(workspace, repo_slug)   # legacy fallback
         if dest.exists():
             shutil.rmtree(dest)
             logger.info("Deleted clone at %s", dest)

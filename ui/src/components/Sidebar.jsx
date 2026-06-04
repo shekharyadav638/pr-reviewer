@@ -1,46 +1,155 @@
 import { useState } from "react";
-import { addRepo, deleteRepo, indexRepo, fetchRepoPRs, syncRepo } from "../api/client";
+import { addRepo, deleteRepo, indexRepo, fetchRepoPRs, syncRepo, registerWebhook } from "../api/client";
 
-const STATUS_CFG = {
-  pending:  { color: "#6b7280", label: "Not indexed" },
-  indexing: { color: "#f59e0b", label: "Indexing…"  },
-  indexed:  { color: "#22c55e", label: "Indexed"     },
-  error:    { color: "#ef4444", label: "Error"       },
-};
+function statusDotClass(repo) {
+  if (repo.index_status  === "indexing")  return "repo-dot repo-dot-indexing";
+  if (repo.clone_status  === "cloning")   return "repo-dot repo-dot-cloning";
+  if (repo.graph_status  === "building")  return "repo-dot repo-dot-building";
+  if (repo.index_status  === "indexed")   return "repo-dot repo-dot-indexed";
+  if (repo.index_status  === "error" || repo.clone_status === "error") return "repo-dot repo-dot-error";
+  return "repo-dot repo-dot-pending";
+}
 
-function RepoDot({ status }) {
-  const c = STATUS_CFG[status] || STATUS_CFG.pending;
+function BranchProgressBar({ repo }) {
+  const isBusy =
+    repo.clone_status === "cloning" ||
+    repo.index_status === "indexing" ||
+    repo.graph_status === "building";
+
+  if (!isBusy && !repo.current_branch) return null;
+
+  const pct   = repo.index_progress || repo.clone_progress || 0;
+  const total = repo.total_branches  || 0;
+  const cur   = repo.current_branch  || "";
+
+  const label = cur
+    ? `${cur}${total > 1 ? ` (${Math.round(pct / 100 * total)}/${total})` : ""}`
+    : `${pct}%`;
+
+  const color =
+    repo.clone_status  === "cloning"  ? "orange" :
+    repo.graph_status  === "building" ? "purple" : "blue";
+
   return (
-    <span title={c.label} style={{
-      width: 8, height: 8, borderRadius: "50%",
-      backgroundColor: c.color, flexShrink: 0, display: "inline-block",
-    }} />
+    <div className="repo-progress">
+      {repo.clone_status === "cloning"  && "Cloning "}
+      {repo.graph_status === "building" && "Building graph "}
+      {repo.index_status === "indexing" && "Indexing "}
+      <span style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{label}</span>
+      <div className="repo-progress-bar">
+        <div className={`repo-progress-fill ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
   );
 }
 
-function NavItem({ icon, label, active, onClick, badge }) {
+
+function RepoItem({
+  repo, isSelected, selectedView,
+  onSelectSource, onSelectPRs, onIndex, onSync, onFetch, onDelete, onWebhook, syncing, webhooking,
+}) {
+  const [open, setOpen] = useState(false);
+
+  const busy = repo.clone_status === "cloning" ||
+               repo.index_status === "indexing" ||
+               repo.graph_status === "building";
+
+  const indexedBranches = repo.indexed_branches || [];
+  const isIndexed       = repo.index_status === "indexed";
+
   return (
-    <div
-      onClick={onClick}
-      style={{
-        display: "flex", alignItems: "center", gap: 10,
-        padding: "7px 14px 7px 20px", cursor: "pointer", userSelect: "none",
-        backgroundColor: active ? "rgba(255,255,255,0.07)" : "transparent",
-        borderLeft: active ? "3px solid #579dff" : "3px solid transparent",
-        borderRadius: "0 6px 6px 0",
-        transition: "background 0.12s",
-        fontSize: "0.85rem", color: active ? "#e2e8f0" : "#8c9bab",
-      }}
-      onMouseEnter={e => { if (!active) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.04)"; }}
-      onMouseLeave={e => { if (!active) e.currentTarget.style.backgroundColor = "transparent"; }}
-    >
-      <span style={{ fontSize: "0.9rem", width: 16, textAlign: "center" }}>{icon}</span>
-      <span style={{ flex: 1 }}>{label}</span>
-      {badge != null && badge > 0 && (
-        <span style={{
-          backgroundColor: "#334155", color: "#94a3b8",
-          borderRadius: 10, padding: "1px 7px", fontSize: "0.7rem", fontWeight: 600,
-        }}>{badge}</span>
+    <div>
+      <div
+        className={`repo-row${isSelected ? " selected" : ""}`}
+        onClick={() => { onSelectSource(repo.id); setOpen(v => !v); }}
+      >
+        <span className={statusDotClass(repo)} />
+        <div className="repo-info">
+          <div className="repo-slug">{repo.repo_slug}</div>
+          <div className="repo-workspace">
+            {repo.workspace}
+            {isIndexed && indexedBranches.length > 0 && (
+              <span style={{ marginLeft: 5, color: "var(--green)", fontSize: "0.62rem" }}>
+                · {indexedBranches.length} branch{indexedBranches.length !== 1 ? "es" : ""}
+              </span>
+            )}
+          </div>
+        </div>
+        <span className={`repo-chevron${open ? " open" : ""}`}>▶</span>
+      </div>
+
+      <BranchProgressBar repo={repo} />
+
+      {open && (
+        <div className="repo-submenu">
+          <div
+            className={`nav-item${isSelected && selectedView === "source" ? " active" : ""}`}
+            style={{ paddingLeft: 24 }}
+            onClick={() => onSelectSource(repo.id)}
+          >
+            <span className="nav-item-icon">📁</span>
+            <span className="nav-item-label">Source</span>
+          </div>
+          <div
+            className={`nav-item${isSelected && selectedView === "prs" ? " active" : ""}`}
+            style={{ paddingLeft: 24 }}
+            onClick={() => onSelectPRs(repo.id)}
+          >
+            <span className="nav-item-icon">⎇</span>
+            <span className="nav-item-label">Pull Requests</span>
+            {repo.pr_count > 0 && (
+              <span className="nav-item-badge">{repo.pr_count}</span>
+            )}
+          </div>
+
+
+          <div className="repo-actions">
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={e => { e.stopPropagation(); onIndex(repo.id); }}
+              disabled={busy}
+              title="Fetch all branches from Bitbucket and index each one"
+            >
+              {busy
+                ? (repo.current_branch
+                    ? `Indexing ${repo.current_branch}…`
+                    : `${repo.index_progress || 0}%…`)
+                : isIndexed ? "Re-index all" : "Index all branches"}
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={e => { e.stopPropagation(); onSync(repo.id); }}
+              disabled={syncing === repo.id || busy}
+            >
+              {syncing === repo.id ? "Syncing…" : "↻ Sync all"}
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={e => { e.stopPropagation(); onFetch(repo.id); }}
+              disabled={repo.pr_fetch_status === "fetching"}
+            >
+              {repo.pr_fetch_status === "fetching" ? "Fetching…" : "Fetch PRs"}
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={e => { e.stopPropagation(); onWebhook(repo.id); }}
+              disabled={webhooking === repo.id}
+              title="Register PR Guardian webhook on this Bitbucket repo"
+            >
+              {webhooking === repo.id ? "Registering…" : "⚡ Webhook"}
+            </button>
+            <button
+              className="btn btn-danger btn-sm"
+              onClick={e => { e.stopPropagation(); onDelete(repo); }}
+            >Remove</button>
+          </div>
+
+          {(repo.index_error || repo.clone_error || repo.graph_error) && (
+            <div className="repo-error">
+              {repo.clone_error || repo.graph_error || repo.index_error}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -48,13 +157,14 @@ function NavItem({ icon, label, active, onClick, badge }) {
 
 export default function Sidebar({
   repos, selectedRepoId, selectedView,
-  onSelectRepo, onSelectPRs, onSelectSource, onReposChanged, onError,
+  onSelectRepo, onSelectPRs, onSelectSource, onReposChanged, onError, onBrowseBitbucket,
 }) {
-  const [addOpen, setAddOpen]   = useState(false);
-  const [repoUrl, setRepoUrl]   = useState("");
-  const [adding, setAdding]     = useState(false);
-  const [expanded, setExpanded] = useState(null);
-  const [syncing, setSyncing]   = useState(null); // repoId being synced
+  const [addOpen, setAddOpen]     = useState(false);
+  const [repoUrl, setRepoUrl]     = useState("");
+  const [adding, setAdding]       = useState(false);
+  const [syncing, setSyncing]     = useState(null);
+  const [webhooking, setWebhooking] = useState(null);
+  const [webhookMsg, setWebhookMsg] = useState("");
 
   async function handleAdd(e) {
     e.preventDefault();
@@ -67,29 +177,42 @@ export default function Sidebar({
     finally { setAdding(false); }
   }
 
-  async function handleIndex(e, repo) {
-    e.stopPropagation();
-    try { await indexRepo(repo.id); onReposChanged(); }
+  async function handleIndex(repoId) {
+    try { await indexRepo(repoId); onReposChanged(); }
     catch (err) { onError(err.message); }
   }
 
-  async function handleFetch(e, repo) {
-    e.stopPropagation();
-    try { await fetchRepoPRs(repo.id); onReposChanged(); }
-    catch (err) { onError(err.message); }
-  }
-
-  async function handleSync(e, repo) {
-    e.stopPropagation();
-    setSyncing(repo.id);
-    try { await syncRepo(repo.id); onReposChanged(); }
+  async function handleSync(repoId) {
+    setSyncing(repoId);
+    try { await syncRepo(repoId); onReposChanged(); }
     catch (err) { onError(err.message); }
     finally { setSyncing(null); }
   }
 
-  async function handleDelete(e, repo) {
-    e.stopPropagation();
-    if (!window.confirm(`Remove "${repo.display_name}"?`)) return;
+  async function handleFetch(repoId) {
+    try { await fetchRepoPRs(repoId); onReposChanged(); }
+    catch (err) { onError(err.message); }
+  }
+
+  async function handleWebhook(repoId) {
+    setWebhooking(repoId);
+    setWebhookMsg("");
+    try {
+      const res = await registerWebhook(repoId);
+      if (res.status === "registered") setWebhookMsg("✓ Webhook registered");
+      else if (res.status === "already_registered") setWebhookMsg("✓ Already registered");
+      else if (res.status === "permission_denied") setWebhookMsg("✗ App password missing Webhooks scope");
+      else setWebhookMsg(res.message || "Done");
+      setTimeout(() => setWebhookMsg(""), 4000);
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setWebhooking(null);
+    }
+  }
+
+  async function handleDelete(repo) {
+    if (!window.confirm(`Remove "${repo.display_name || repo.repo_slug}"?`)) return;
     try {
       await deleteRepo(repo.id);
       if (selectedRepoId === repo.id) onSelectRepo(null);
@@ -97,234 +220,116 @@ export default function Sidebar({
     } catch (err) { onError(err.message); }
   }
 
-  function toggleExpand(id) {
-    setExpanded(prev => prev === id ? null : id);
-  }
-
   return (
-    <aside style={{
-      width: 240, minWidth: 240, backgroundColor: "#161b22",
-      display: "flex", flexDirection: "column", height: "100vh",
-      overflowY: "auto", borderRight: "1px solid #21262d", flexShrink: 0,
-    }}>
+    <aside className="app-sidebar">
       {/* Logo */}
-      <div style={{
-        padding: "16px 16px 14px", borderBottom: "1px solid #21262d",
-        display: "flex", alignItems: "center", gap: 10,
-      }}>
-        <div style={{
-          width: 30, height: 30, borderRadius: 6,
-          background: "linear-gradient(135deg,#7c3aed,#2563eb)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: "1rem", flexShrink: 0,
-        }}>🛡</div>
-        <div>
-          <div style={{ fontWeight: 700, fontSize: "0.92rem", color: "#e2e8f0" }}>
-            PR Guardian
-          </div>
-          <div style={{ fontSize: "0.68rem", color: "#4b5563" }}>Code review platform</div>
+      <div className="sidebar-logo">
+        <div className="sidebar-logo-icon">🛡</div>
+        <div className="sidebar-logo-text">
+          <div className="sidebar-logo-name">PR Guardian</div>
+          <div className="sidebar-logo-sub">AI code review</div>
         </div>
       </div>
 
-      {/* Section label + add button */}
-      <div style={{
-        padding: "14px 14px 4px",
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-      }}>
-        <span style={{
-          fontSize: "0.68rem", fontWeight: 700, color: "#4b5563",
-          textTransform: "uppercase", letterSpacing: "0.1em",
-        }}>Repositories</span>
-        <button
-          onClick={() => setAddOpen(v => !v)}
-          title="Add repository"
-          style={{
-            background: "none", border: "none", cursor: "pointer",
-            color: addOpen ? "#579dff" : "#4b5563", fontSize: "1.1rem",
-            lineHeight: 1, padding: "2px 4px", borderRadius: 4,
-            transition: "color 0.15s",
-          }}
-        >+</button>
-      </div>
-
-      {/* Add repo input */}
-      {addOpen && (
-        <form onSubmit={handleAdd} style={{ padding: "4px 12px 10px" }}>
-          <input
-            autoFocus value={repoUrl}
-            onChange={e => setRepoUrl(e.target.value)}
-            placeholder="workspace/repo or Bitbucket URL"
-            disabled={adding}
-            style={{
-              width: "100%", boxSizing: "border-box",
-              padding: "7px 10px", fontSize: "0.8rem",
-              background: "#0d1117", color: "#e2e8f0",
-              border: "1px solid #30363d", borderRadius: 6, outline: "none",
-              marginBottom: 6,
-            }}
-          />
-          <div style={{ display: "flex", gap: 6 }}>
-            <button type="submit" disabled={adding || !repoUrl.trim()} style={{
-              flex: 1, padding: "6px 0", fontSize: "0.78rem", fontWeight: 600,
-              backgroundColor: "#1f6feb", color: "#fff",
-              border: "none", borderRadius: 5, cursor: "pointer",
-            }}>
-              {adding ? "Adding…" : "Add"}
-            </button>
-            <button type="button" onClick={() => setAddOpen(false)} style={{
-              padding: "6px 10px", fontSize: "0.78rem",
-              backgroundColor: "#21262d", color: "#8c9bab",
-              border: "1px solid #30363d", borderRadius: 5, cursor: "pointer",
-            }}>✕</button>
+      <div className="sidebar-scroll">
+        {/* Bitbucket Browse */}
+        <div className="sidebar-section" style={{ paddingTop: 10 }}>
+          <div
+            className={`bb-browse-btn${selectedView === "bitbucket" ? " active" : ""}`}
+            onClick={onBrowseBitbucket}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ flexShrink: 0 }}>
+              <path d="M.778 1.211c-.424-.006-.772.337-.778.761v.044l3.352 19.234a1.01 1.01 0 0 0 .99.75h15.33a.753.753 0 0 0 .753-.65L23.78 2.016a.762.762 0 0 0-.778-.805zm13.52 13.188h-4.63L8.022 9.6h7.956z"/>
+            </svg>
+            <span>Browse Bitbucket</span>
           </div>
-        </form>
-      )}
+        </div>
 
-      {/* Repo list */}
-      <nav style={{ flex: 1, paddingBottom: 16 }}>
-        {repos.length === 0 && (
-          <p style={{ padding: "10px 16px", fontSize: "0.8rem", color: "#4b5563" }}>
-            No repos yet. Click + to add one.
-          </p>
-        )}
+        {/* Repositories */}
+        <div className="sidebar-section">
+          <div className="sidebar-section-header">
+            <span className="sidebar-section-title">My Repos</span>
+            <button
+              className="sidebar-add-btn"
+              title="Add repository by URL"
+              onClick={() => setAddOpen(v => !v)}
+            >+</button>
+          </div>
 
-        {repos.map(repo => {
-          const isExpanded = expanded === repo.id;
-          const isSelected = selectedRepoId === repo.id;
-
-          return (
-            <div key={repo.id}>
-              {/* Repo row */}
-              <div
-                onClick={() => { onSelectRepo(repo.id); toggleExpand(repo.id); }}
-                style={{
-                  display: "flex", alignItems: "center", gap: 8,
-                  padding: "8px 12px 8px 14px", cursor: "pointer",
-                  backgroundColor: isSelected ? "rgba(255,255,255,0.05)" : "transparent",
-                  borderLeft: isSelected ? "3px solid #579dff" : "3px solid transparent",
-                  transition: "background 0.12s",
-                }}
-                onMouseEnter={e => { if (!isSelected) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.03)"; }}
-                onMouseLeave={e => { if (!isSelected) e.currentTarget.style.backgroundColor = "transparent"; }}
-              >
-                <RepoDot status={repo.index_status} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{
-                    fontSize: "0.84rem", fontWeight: 500, color: "#c9d1d9",
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>{repo.repo_slug}</div>
-                  <div style={{ fontSize: "0.7rem", color: "#4b5563" }}>{repo.workspace}</div>
-                </div>
-                <span style={{
-                  color: "#4b5563", fontSize: "0.6rem",
-                  transform: isExpanded ? "rotate(90deg)" : "none",
-                  transition: "transform 0.15s",
-                }}>▶</span>
+          {addOpen && (
+            <form onSubmit={handleAdd} style={{ padding: "0 12px 10px" }}>
+              <input
+                autoFocus
+                className="input input-sm"
+                value={repoUrl}
+                onChange={e => setRepoUrl(e.target.value)}
+                placeholder="workspace/repo or git URL"
+                disabled={adding}
+                style={{ marginBottom: 6 }}
+              />
+              <div className="flex gap-2">
+                <button type="submit" className="btn btn-primary btn-sm" disabled={adding || !repoUrl.trim()} style={{ flex: 1 }}>
+                  {adding ? "Adding…" : "Add"}
+                </button>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAddOpen(false)}>✕</button>
               </div>
+            </form>
+          )}
 
-              {/* Progress bar while indexing */}
-              {repo.index_status === "indexing" && (
-                <div style={{ margin: "0 14px 4px", height: 3, background: "#21262d", borderRadius: 2 }}>
-                  <div style={{
-                    width: `${repo.index_progress}%`, height: "100%",
-                    background: "#1f6feb", borderRadius: 2, transition: "width 0.3s",
-                  }} />
-                </div>
-              )}
-
-              {/* Sub-menu */}
-              {isExpanded && (
-                <div style={{ background: "#0d1117", borderBottom: "1px solid #21262d" }}>
-                  <NavItem
-                    icon="📁" label="Source"
-                    active={isSelected && selectedView === "source"}
-                    onClick={() => onSelectSource && onSelectSource(repo.id)}
-                  />
-                  <NavItem
-                    icon="📋" label="Pull Requests"
-                    badge={repo.pr_count}
-                    active={isSelected && selectedView === "prs"}
-                    onClick={() => onSelectPRs(repo.id)}
-                  />
-
-                  {/* Clone / graph status */}
-                  {(repo.clone_status === "cloning" || repo.graph_status === "building") && (
-                    <div style={{ padding: "2px 14px 4px", fontSize: "0.7rem", color: "#8b949e" }}>
-                      {repo.clone_status === "cloning"
-                        ? `Cloning… ${repo.clone_progress}%`
-                        : `Building graph… ${repo.graph_progress}%`}
-                      <div style={{ marginTop: 4, height: 2, background: "#21262d", borderRadius: 2 }}>
-                        <div style={{
-                          width: `${repo.clone_status === "cloning" ? repo.clone_progress : repo.graph_progress}%`,
-                          height: "100%", background: "#f59e0b", borderRadius: 2, transition: "width 0.3s",
-                        }} />
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Action buttons */}
-                  <div style={{ padding: "6px 14px 8px", display: "flex", flexWrap: "wrap", gap: 5 }}>
-                    <button
-                      onClick={e => handleIndex(e, repo)}
-                      disabled={repo.index_status === "indexing" || repo.clone_status === "cloning"}
-                      style={{
-                        padding: "4px 10px", fontSize: "0.72rem", fontWeight: 600,
-                        border: "1px solid #1f6feb", borderRadius: 4, cursor: "pointer",
-                        backgroundColor: "transparent", color: "#579dff",
-                        opacity: (repo.index_status === "indexing" || repo.clone_status === "cloning") ? 0.5 : 1,
-                      }}
-                    >
-                      {repo.index_status === "indexing"
-                        ? `${repo.index_progress}%…`
-                        : repo.index_status === "indexed" ? "Re-index" : "Build Index"}
-                    </button>
-                    <button
-                      onClick={e => handleSync(e, repo)}
-                      disabled={syncing === repo.id || repo.clone_status === "cloning"}
-                      style={{
-                        padding: "4px 10px", fontSize: "0.72rem", fontWeight: 600,
-                        border: "1px solid #30363d", borderRadius: 4, cursor: "pointer",
-                        backgroundColor: "transparent", color: "#8c9bab",
-                        opacity: (syncing === repo.id || repo.clone_status === "cloning") ? 0.5 : 1,
-                      }}
-                    >
-                      {syncing === repo.id ? "Syncing…" : "↻ Sync"}
-                    </button>
-                    <button
-                      onClick={e => handleFetch(e, repo)}
-                      disabled={repo.pr_fetch_status === "fetching"}
-                      style={{
-                        padding: "4px 10px", fontSize: "0.72rem", fontWeight: 600,
-                        border: "1px solid #30363d", borderRadius: 4, cursor: "pointer",
-                        backgroundColor: "transparent", color: "#8c9bab",
-                        opacity: repo.pr_fetch_status === "fetching" ? 0.5 : 1,
-                      }}
-                    >
-                      {repo.pr_fetch_status === "fetching" ? "Fetching…" : "Fetch PRs"}
-                    </button>
-                    <button
-                      onClick={e => handleDelete(e, repo)}
-                      style={{
-                        padding: "4px 10px", fontSize: "0.72rem", fontWeight: 600,
-                        border: "1px solid #6b2737", borderRadius: 4, cursor: "pointer",
-                        backgroundColor: "transparent", color: "#f87171",
-                      }}
-                    >Remove</button>
-                  </div>
-
-                  {(repo.index_error || repo.clone_error || repo.graph_error) && (
-                    <div style={{
-                      margin: "0 12px 8px", padding: "5px 8px", borderRadius: 4,
-                      background: "#160b0b", border: "1px solid #6b2737",
-                      fontSize: "0.72rem", color: "#f87171",
-                    }}>{repo.clone_error || repo.graph_error || repo.index_error}</div>
-                  )}
-                </div>
-              )}
+          {repos.length === 0 && !addOpen && (
+            <div style={{ padding: "8px 14px 4px", fontSize: "0.75rem", color: "var(--text-muted)" }}>
+              No repos connected yet.
             </div>
-          );
-        })}
-      </nav>
+          )}
+
+          {webhookMsg && (
+            <div style={{ padding: "4px 14px", fontSize: "0.75rem",
+              color: webhookMsg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>
+              {webhookMsg}
+            </div>
+          )}
+
+          {repos.map(repo => (
+            <RepoItem
+              key={repo.id}
+              repo={repo}
+              isSelected={selectedRepoId === repo.id}
+              selectedView={selectedView}
+              onSelectSource={onSelectSource}
+              onSelectPRs={onSelectPRs}
+              onIndex={handleIndex}
+              onSync={handleSync}
+              onFetch={handleFetch}
+              onDelete={handleDelete}
+              onWebhook={handleWebhook}
+              syncing={syncing}
+              webhooking={webhooking}
+            />
+          ))}
+        </div>
+
+        {/* Webhook hint */}
+        <div style={{
+          margin: "12px 12px 0",
+          padding: "10px 12px",
+          background: "var(--surface-2)",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius)",
+          fontSize: "0.72rem",
+          color: "var(--text-muted)",
+          lineHeight: 1.5,
+        }}>
+          <div style={{ fontWeight: 600, color: "var(--text-secondary)", marginBottom: 4 }}>
+            ⚡ Auto-review with webhooks
+          </div>
+          Connect Bitbucket webhooks to auto-review every new PR.
+          <div style={{ marginTop: 6 }}>
+            <span onClick={onBrowseBitbucket} style={{ color: "var(--blue)", cursor: "pointer", textDecoration: "underline" }}>
+              Set up webhook →
+            </span>
+          </div>
+        </div>
+      </div>
     </aside>
   );
 }

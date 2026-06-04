@@ -1,16 +1,12 @@
 import { useState, useEffect } from "react";
-import { analyzeHybrid, getRepoPRs } from "../api/client";
-import { getPRDiff, postPRComment } from "../api/client";
+import { analyzeHybrid, getPRDiff, postPRComment, postReviewComments } from "../api/client";
 import Spinner from "../components/Spinner";
 import HybridResultCard from "../components/HybridResultCard";
-
-// ─── Diff parser ────────────────────────────────────────────────────────────
 
 function parseDiff(raw) {
   const files = [];
   let current = null;
   let aLine = 0, bLine = 0;
-
   for (const line of raw.split("\n")) {
     if (line.startsWith("diff --git")) {
       if (current) files.push(current);
@@ -37,21 +33,17 @@ function parseDiff(raw) {
   return files;
 }
 
-// ─── Diff line component with inline comment trigger ─────────────────────────
-
 function DiffLine({ line, filepath, onAddComment, reviewComments }) {
   const lineNo = line.bLine ?? line.aLine;
-  const existing = reviewComments.filter(
-    c => c.filepath === filepath && c.line === lineNo
-  );
-
+  const existing = reviewComments.filter(c => c.filepath === filepath && c.line === lineNo);
   const [hover, setHover] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [commentText, setCommentText] = useState("");
   const [posting, setPosting] = useState(false);
 
-  const bgColor = line.type === "add" ? "#0d2818" : line.type === "del" ? "#2d0f0f" : "transparent";
-  const textColor = line.type === "add" ? "#4ade80" : line.type === "del" ? "#f87171" : "#c9d1d9";
+  const bgColor = line.type === "add" ? "#e6ffec" : line.type === "del" ? "#ffebe9" : "transparent";
+  const textColor = line.type === "add" ? "#116329" : line.type === "del" ? "#82071e" : "var(--text)";
+  const numColor = line.type === "add" ? "#4ac26b" : line.type === "del" ? "#f5c6c2" : "var(--text-muted)";
   const prefix = line.type === "add" ? "+" : line.type === "del" ? "−" : " ";
 
   async function submitComment(e) {
@@ -71,46 +63,33 @@ function DiffLine({ line, filepath, onAddComment, reviewComments }) {
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
       >
-        {/* Line numbers */}
         <span style={{
           minWidth: 42, padding: "1px 8px", textAlign: "right",
-          fontSize: "0.72rem", color: "#4b5563", userSelect: "none",
-          borderRight: "1px solid #21262d", flexShrink: 0,
+          fontSize: "0.72rem", color: numColor, userSelect: "none",
+          borderRight: "1px solid var(--border)", flexShrink: 0,
           fontFamily: "monospace",
-        }}>
-          {line.aLine ?? ""}
-        </span>
+        }}>{line.aLine ?? ""}</span>
         <span style={{
           minWidth: 42, padding: "1px 8px", textAlign: "right",
-          fontSize: "0.72rem", color: "#4b5563", userSelect: "none",
-          borderRight: "1px solid #21262d", flexShrink: 0,
+          fontSize: "0.72rem", color: numColor, userSelect: "none",
+          borderRight: "1px solid var(--border)", flexShrink: 0,
           fontFamily: "monospace",
-        }}>
-          {line.bLine ?? ""}
-        </span>
-
-        {/* Prefix */}
+        }}>{line.bLine ?? ""}</span>
         <span style={{
           width: 20, padding: "1px 4px", color: textColor,
-          fontFamily: "monospace", fontSize: "0.82rem", userSelect: "none",
-          flexShrink: 0,
+          fontFamily: "monospace", fontSize: "0.82rem", userSelect: "none", flexShrink: 0,
         }}>{prefix}</span>
-
-        {/* Code */}
         <span style={{
           flex: 1, padding: "1px 8px 1px 0",
           fontFamily: "monospace", fontSize: "0.82rem", color: textColor,
           whiteSpace: "pre", overflow: "hidden",
         }}>{line.text}</span>
-
-        {/* Add comment button on hover */}
         {hover && lineNo && (
           <button
             onClick={() => setShowForm(v => !v)}
-            title="Add comment"
             style={{
               position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
-              background: "#1f6feb", border: "none", borderRadius: 4,
+              background: "var(--blue)", border: "none", borderRadius: 4,
               color: "#fff", cursor: "pointer", padding: "2px 8px",
               fontSize: "0.72rem", fontWeight: 700, zIndex: 2,
             }}
@@ -118,10 +97,9 @@ function DiffLine({ line, filepath, onAddComment, reviewComments }) {
         )}
       </div>
 
-      {/* Inline comment form */}
       {showForm && (
         <div style={{
-          background: "#161b22", border: "1px solid #30363d",
+          background: "var(--blue-bg)", border: "1px solid var(--blue-border)",
           borderRadius: 6, margin: "4px 8px 4px 104px", padding: 10,
         }}>
           <form onSubmit={submitComment}>
@@ -132,8 +110,8 @@ function DiffLine({ line, filepath, onAddComment, reviewComments }) {
               rows={3}
               style={{
                 width: "100%", boxSizing: "border-box",
-                background: "#0d1117", color: "#e2e8f0",
-                border: "1px solid #30363d", borderRadius: 5,
+                background: "var(--surface)", color: "var(--text)",
+                border: "1px solid var(--border)", borderRadius: 5,
                 padding: "7px 10px", fontSize: "0.83rem",
                 resize: "vertical", outline: "none", marginBottom: 6,
               }}
@@ -141,27 +119,27 @@ function DiffLine({ line, filepath, onAddComment, reviewComments }) {
             <div style={{ display: "flex", gap: 6 }}>
               <button type="submit" disabled={posting || !commentText.trim()} style={{
                 padding: "5px 14px", fontSize: "0.8rem", fontWeight: 600,
-                backgroundColor: "#1f6feb", color: "#fff",
+                backgroundColor: "var(--blue)", color: "#fff",
                 border: "none", borderRadius: 5, cursor: "pointer",
               }}>{posting ? "Posting…" : "Add Comment"}</button>
               <button type="button" onClick={() => setShowForm(false)} style={{
                 padding: "5px 12px", fontSize: "0.8rem",
-                background: "transparent", color: "#8c9bab",
-                border: "1px solid #30363d", borderRadius: 5, cursor: "pointer",
+                background: "var(--surface)", color: "var(--text-secondary)",
+                border: "1px solid var(--border)", borderRadius: 5, cursor: "pointer",
               }}>Cancel</button>
             </div>
           </form>
         </div>
       )}
 
-      {/* Existing inline comments */}
       {existing.map((c, i) => (
         <div key={i} style={{
-          background: "#0d2033", border: "1px solid #1f6feb",
+          background: "var(--blue-bg)", border: "1px solid var(--blue-border)",
           borderRadius: 6, margin: "3px 8px 3px 104px", padding: "8px 12px",
-          fontSize: "0.82rem", color: "#c9d1d9",
+          fontSize: "0.82rem", color: "var(--text)",
         }}>
-          <strong style={{ color: "#579dff" }}>You</strong> · just now
+          <strong style={{ color: "var(--blue)" }}>You</strong>
+          <span style={{ color: "var(--text-muted)" }}> · just now</span>
           <p style={{ margin: "4px 0 0" }}>{c.text}</p>
         </div>
       ))}
@@ -169,58 +147,53 @@ function DiffLine({ line, filepath, onAddComment, reviewComments }) {
   );
 }
 
-// ─── File diff block ─────────────────────────────────────────────────────────
-
 function FileDiff({ file, onAddComment, reviewComments, aiIssues }) {
   const [collapsed, setCollapsed] = useState(false);
   const fileIssues = aiIssues.filter(i => i.file === file.path);
 
   return (
     <div style={{
-      border: "1px solid #21262d", borderRadius: 8,
-      overflow: "hidden", marginBottom: 16,
+      border: "1px solid var(--border)", borderRadius: 8,
+      overflow: "hidden", marginBottom: 12,
     }}>
-      {/* File header */}
       <div
         onClick={() => setCollapsed(v => !v)}
         style={{
           display: "flex", alignItems: "center", gap: 10,
-          padding: "10px 14px", background: "#161b22",
+          padding: "9px 14px", background: "var(--surface-2)",
           cursor: "pointer", userSelect: "none",
-          borderBottom: collapsed ? "none" : "1px solid #21262d",
+          borderBottom: collapsed ? "none" : "1px solid var(--border)",
         }}
       >
-        <span style={{ color: "#4b5563", fontSize: "0.8rem" }}>{collapsed ? "▶" : "▼"}</span>
+        <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>{collapsed ? "▶" : "▼"}</span>
         <span style={{
-          fontFamily: "monospace", fontSize: "0.83rem", color: "#c9d1d9", flex: 1,
+          fontFamily: "monospace", fontSize: "0.82rem", color: "var(--text)", flex: 1, fontWeight: 500,
         }}>{file.path}</span>
         {fileIssues.length > 0 && (
           <span style={{
-            background: "#450a0a", color: "#f87171",
-            border: "1px solid #6b2737", borderRadius: 4,
+            background: "var(--red-bg)", color: "var(--red)",
+            border: "1px solid var(--red-border)", borderRadius: 20,
             padding: "1px 8px", fontSize: "0.7rem", fontWeight: 700,
-          }}>⚠ {fileIssues.length} AI issue{fileIssues.length > 1 ? "s" : ""}</span>
+          }}>⚠ {fileIssues.length} issue{fileIssues.length > 1 ? "s" : ""}</span>
         )}
       </div>
 
-      {/* AI issues for this file */}
       {!collapsed && fileIssues.length > 0 && (
-        <div style={{ background: "#160b0b", padding: "8px 14px", borderBottom: "1px solid #21262d" }}>
+        <div style={{ background: "var(--red-bg)", padding: "8px 14px", borderBottom: "1px solid var(--red-border)" }}>
           {fileIssues.map((issue, i) => (
-            <div key={i} style={{ fontSize: "0.8rem", color: "#f87171", marginBottom: 3 }}>
+            <div key={i} style={{ fontSize: "0.8rem", color: "var(--red)", marginBottom: 3 }}>
               ⚠ {issue.description || issue.message}
             </div>
           ))}
         </div>
       )}
 
-      {/* Diff hunks */}
       {!collapsed && file.hunks.map((hunk, hi) => (
         <div key={hi}>
           <div style={{
-            background: "#0d2033", padding: "3px 10px",
-            fontFamily: "monospace", fontSize: "0.75rem", color: "#579dff",
-            borderBottom: "1px solid #21262d",
+            background: "var(--blue-bg)", padding: "3px 10px",
+            fontFamily: "monospace", fontSize: "0.75rem", color: "var(--blue)",
+            borderBottom: "1px solid var(--blue-border)",
           }}>{hunk.header}</div>
           {hunk.lines.map((line, li) => (
             <DiffLine
@@ -235,23 +208,22 @@ function FileDiff({ file, onAddComment, reviewComments, aiIssues }) {
   );
 }
 
-// ─── Main PRDetail page ───────────────────────────────────────────────────────
-
 const TABS = ["Changes", "AI Review"];
 
 export default function PRDetail({ pr, repo, onBack }) {
-  const [tab, setTab]               = useState("Changes");
-  const [diff, setDiff]             = useState(null);
-  const [diffLoading, setDiffLoading] = useState(true);
-  const [diffError, setDiffError]   = useState(null);
-  const [review, setReview]         = useState(null);
-  const [reviewing, setReviewing]   = useState(false);
-  const [reviewError, setReviewError] = useState(null);
+  const [tab, setTab]                     = useState("Changes");
+  const [diff, setDiff]                   = useState(null);
+  const [diffLoading, setDiffLoading]     = useState(true);
+  const [diffError, setDiffError]         = useState(null);
+  const [review, setReview]               = useState(null);
+  const [reviewing, setReviewing]         = useState(false);
+  const [reviewError, setReviewError]     = useState(null);
   const [reviewComments, setReviewComments] = useState([]);
-  const [commentError, setCommentError] = useState(null);
-  const [postedCount, setPostedCount] = useState(0);
+  const [commentError, setCommentError]     = useState(null);
+  const [postedCount, setPostedCount]       = useState(0);
+  const [posting, setPosting]               = useState(false);
+  const [postResult, setPostResult]         = useState(null);
 
-  // Load diff on mount
   useEffect(() => {
     if (!repo || !pr) return;
     getPRDiff(repo.id, pr.pr_id)
@@ -270,6 +242,21 @@ export default function PRDetail({ pr, repo, onBack }) {
     finally { setReviewing(false); }
   }
 
+  async function handlePostReviewComments() {
+    if (!review) return;
+    setPosting(true);
+    setCommentError(null);
+    setPostResult(null);
+    try {
+      const result = await postReviewComments(repo.id, pr.pr_id, review);
+      setPostResult(result);
+    } catch (e) {
+      setCommentError(`Failed to post review comments: ${e.message}`);
+    } finally {
+      setPosting(false);
+    }
+  }
+
   async function handleAddComment(filepath, line, text) {
     setCommentError(null);
     try {
@@ -282,65 +269,114 @@ export default function PRDetail({ pr, repo, onBack }) {
   }
 
   const parsedFiles = diff?.diff ? parseDiff(diff.diff) : [];
-  const aiIssues = review
-    ? [
-        ...(review.llm_detected_issues || []),
-        ...(review.llm_security_concerns || []),
-        ...(review.static_analysis_issues || []).map(i => ({ file: i.file, description: `[${i.rule}] ${i.message}` })),
-      ]
-    : [];
+  const aiIssues = review ? [
+    ...(review.llm_detected_issues || []),
+    ...(review.llm_security_concerns || []),
+    ...(review.static_analysis_issues || []).map(i => ({ file: i.file, description: `[${i.rule}] ${i.message}` })),
+  ] : [];
+
+  const riskBg  = review?.risk_level === "HIGH" ? "var(--red-bg)"
+                : review?.risk_level === "MEDIUM" ? "var(--orange-bg)"
+                : "var(--green-bg)";
+  const riskColor = review?.risk_level === "HIGH" ? "var(--red)"
+                  : review?.risk_level === "MEDIUM" ? "var(--orange)"
+                  : "var(--green)";
+  const riskBorder = review?.risk_level === "HIGH" ? "var(--red-border)"
+                   : review?.risk_level === "MEDIUM" ? "var(--orange-border)"
+                   : "var(--green-border)";
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", background: "var(--bg)" }}>
 
       {/* Top bar */}
       <div style={{
-        padding: "16px 24px", borderBottom: "1px solid #21262d",
-        background: "#0d1117", flexShrink: 0,
+        padding: "14px 24px", borderBottom: "1px solid var(--border)",
+        background: "var(--surface)", flexShrink: 0,
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
           <button onClick={onBack} style={{
             background: "none", border: "none", cursor: "pointer",
-            color: "#579dff", fontWeight: 600, fontSize: "0.85rem", padding: 0,
+            color: "var(--blue)", fontWeight: 600, fontSize: "0.85rem", padding: 0,
           }}>← {repo?.repo_slug}</button>
-          <span style={{ color: "#30363d" }}>/</span>
-          <span style={{ color: "#6b7280", fontSize: "0.85rem" }}>Pull request #{pr.pr_id}</span>
+          <span style={{ color: "var(--border-strong)" }}>/</span>
+          <span style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Pull request #{pr.pr_id}</span>
         </div>
 
         <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
           <div style={{ flex: 1 }}>
-            <h1 style={{ margin: "0 0 4px", fontSize: "1.15rem", color: "#e2e8f0", fontWeight: 700 }}>
+            <h1 style={{ margin: "0 0 3px", fontSize: "1.1rem", color: "var(--text)", fontWeight: 700 }}>
               {pr.title}
             </h1>
-            <p style={{ margin: 0, fontSize: "0.82rem", color: "#6b7280" }}>
+            <p style={{ margin: 0, fontSize: "0.82rem", color: "var(--text-secondary)" }}>
               #{pr.pr_id} · {pr.author}
               {pr.created_at && ` · ${new Date(pr.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`}
             </p>
           </div>
 
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0, flexWrap: "wrap" }}>
             {postedCount > 0 && (
               <span style={{
-                fontSize: "0.78rem", color: "#4ade80",
-                background: "#1a4731", border: "1px solid #166534",
-                borderRadius: 4, padding: "3px 10px",
+                fontSize: "0.78rem", color: "var(--green)",
+                background: "var(--green-bg)", border: "1px solid var(--green-border)",
+                borderRadius: 20, padding: "3px 10px",
               }}>✓ {postedCount} comment{postedCount > 1 ? "s" : ""} posted</span>
             )}
+            {postResult && (
+              <span style={{
+                fontSize: "0.78rem", color: "var(--green)",
+                background: "var(--green-bg)", border: "1px solid var(--green-border)",
+                borderRadius: 20, padding: "3px 10px",
+              }}>✓ {postResult.posted} issue{postResult.posted !== 1 ? "s" : ""} posted to PR
+                {postResult.skipped > 0 && `, ${postResult.skipped} skipped`}
+              </span>
+            )}
+            {review && (() => {
+              const issueCount = (review.llm_detected_issues?.length || 0)
+                + (review.llm_security_concerns?.length || 0)
+                + (review.llm_performance_concerns?.length || 0)
+                + (review.llm_code_smells?.length || 0)
+                + (review.static_analysis_issues?.length || 0);
+              return issueCount > 0 ? (
+                <button
+                  onClick={handlePostReviewComments}
+                  disabled={posting}
+                  style={{
+                    padding: "7px 14px", fontSize: "0.82rem", fontWeight: 600,
+                    backgroundColor: posting ? "var(--surface-2)" : "var(--orange-bg)",
+                    color: posting ? "var(--text-muted)" : "var(--orange)",
+                    border: "1px solid var(--orange-border)", borderRadius: 6,
+                    cursor: posting ? "not-allowed" : "pointer",
+                    display: "flex", alignItems: "center", gap: 6,
+                  }}
+                >
+                  {posting && (
+                    <span style={{
+                      width: 11, height: 11, borderRadius: "50%",
+                      border: "2px solid var(--orange-border)",
+                      borderTopColor: "var(--orange)", display: "inline-block",
+                      animation: "spin 0.7s linear infinite",
+                    }} />
+                  )}
+                  {posting ? "Posting…" : `Post Issues to PR (${issueCount})`}
+                </button>
+              ) : null;
+            })()}
             <button
               onClick={handleReview}
               disabled={reviewing}
               style={{
                 padding: "7px 18px", fontSize: "0.85rem", fontWeight: 700,
-                backgroundColor: reviewing ? "#1a3a6b" : "#1f6feb",
-                color: "#fff", border: "none", borderRadius: 6,
+                backgroundColor: "var(--blue)", color: "#fff",
+                border: "none", borderRadius: 6,
                 cursor: reviewing ? "not-allowed" : "pointer",
+                opacity: reviewing ? 0.7 : 1,
                 display: "flex", alignItems: "center", gap: 6,
               }}
             >
               {reviewing && (
                 <span style={{
                   width: 12, height: 12, borderRadius: "50%",
-                  border: "2px solid rgba(255,255,255,0.3)",
+                  border: "2px solid rgba(255,255,255,0.4)",
                   borderTopColor: "#fff", display: "inline-block",
                   animation: "spin 0.7s linear infinite",
                 }} />
@@ -353,67 +389,65 @@ export default function PRDetail({ pr, repo, onBack }) {
         {reviewError && (
           <div style={{
             marginTop: 10, padding: "8px 12px", borderRadius: 6,
-            background: "#450a0a", border: "1px solid #6b2737",
-            color: "#f87171", fontSize: "0.82rem",
+            background: "var(--red-bg)", border: "1px solid var(--red-border)",
+            color: "var(--red)", fontSize: "0.82rem",
           }}>{reviewError}</div>
         )}
         {commentError && (
           <div style={{
-            marginTop: 10, padding: "8px 12px", borderRadius: 6,
-            background: "#450a0a", border: "1px solid #6b2737",
-            color: "#f87171", fontSize: "0.82rem",
+            marginTop: 8, padding: "8px 12px", borderRadius: 6,
+            background: "var(--red-bg)", border: "1px solid var(--red-border)",
+            color: "var(--red)", fontSize: "0.82rem",
           }}>{commentError}</div>
         )}
       </div>
 
       {/* Tabs */}
       <div style={{
-        display: "flex", gap: 0, borderBottom: "1px solid #21262d",
-        background: "#0d1117", flexShrink: 0, padding: "0 24px",
+        display: "flex", borderBottom: "1px solid var(--border)",
+        background: "var(--surface)", flexShrink: 0, padding: "0 24px",
       }}>
         {TABS.map(t => (
           <button key={t} onClick={() => setTab(t)} style={{
             padding: "10px 16px", fontSize: "0.85rem", fontWeight: 600,
             background: "none", border: "none", cursor: "pointer",
-            color: tab === t ? "#e2e8f0" : "#6b7280",
-            borderBottom: tab === t ? "2px solid #1f6feb" : "2px solid transparent",
-            marginBottom: -1, transition: "color 0.12s",
+            color: tab === t ? "var(--text)" : "var(--text-secondary)",
+            borderBottom: tab === t ? "2px solid var(--blue)" : "2px solid transparent",
+            marginBottom: -1,
           }}>
             {t}
             {t === "Changes" && parsedFiles.length > 0 && (
               <span style={{
-                marginLeft: 6, background: "#21262d", borderRadius: 10,
-                padding: "1px 7px", fontSize: "0.7rem", color: "#8c9bab",
+                marginLeft: 6, background: "var(--surface-2)", borderRadius: 20,
+                padding: "1px 7px", fontSize: "0.7rem", color: "var(--text-muted)",
+                border: "1px solid var(--border)",
               }}>{parsedFiles.length}</span>
             )}
             {t === "AI Review" && review && (
               <span style={{
-                marginLeft: 6, borderRadius: 10, padding: "1px 7px",
+                marginLeft: 6, borderRadius: 20, padding: "1px 7px",
                 fontSize: "0.7rem", fontWeight: 700,
-                background: review.risk_level === "HIGH" ? "#450a0a" : review.risk_level === "MEDIUM" ? "#431407" : "#1a4731",
-                color: review.risk_level === "HIGH" ? "#f87171" : review.risk_level === "MEDIUM" ? "#fb923c" : "#4ade80",
+                background: riskBg, color: riskColor, border: `1px solid ${riskBorder}`,
               }}>{review.risk_level}</span>
             )}
           </button>
         ))}
       </div>
 
-      {/* Tab content */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-
-        {/* Changes tab */}
+      {/* Content */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px", background: "var(--bg)" }}>
         {tab === "Changes" && (
           <>
             {diffLoading && <Spinner />}
             {diffError && (
               <div style={{
                 padding: "12px 16px", borderRadius: 8,
-                background: "#450a0a", border: "1px solid #6b2737",
-                color: "#f87171", fontSize: "0.85rem",
+                background: "var(--red-bg)", border: "1px solid var(--red-border)",
+                color: "var(--red)", fontSize: "0.85rem",
               }}>{diffError}</div>
             )}
             {!diffLoading && !diffError && parsedFiles.length === 0 && (
-              <p style={{ color: "#4b5563" }}>No diff available for this PR.</p>
+              <p style={{ color: "var(--text-muted)" }}>No diff available for this PR.</p>
             )}
             {!diffLoading && parsedFiles.map((file, i) => (
               <FileDiff
@@ -426,31 +460,33 @@ export default function PRDetail({ pr, repo, onBack }) {
           </>
         )}
 
-        {/* AI Review tab */}
         {tab === "AI Review" && (
           <>
             {!review && !reviewing && (
-              <div style={{
-                textAlign: "center", padding: "60px 20px", color: "#4b5563",
-              }}>
+              <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
                 <div style={{ fontSize: "2.5rem", marginBottom: 12 }}>🤖</div>
-                <p style={{ margin: "0 0 16px" }}>
-                  Click <strong style={{ color: "#8c9bab" }}>AI Review</strong> to run the full hybrid analysis on this PR.
+                <p style={{ margin: "0 0 16px", fontSize: "0.9rem" }}>
+                  Click <strong style={{ color: "var(--text-secondary)" }}>AI Review</strong> to run the full hybrid analysis.
                 </p>
                 <button onClick={handleReview} style={{
                   padding: "8px 20px", fontSize: "0.85rem", fontWeight: 700,
-                  backgroundColor: "#1f6feb", color: "#fff",
+                  backgroundColor: "var(--blue)", color: "#fff",
                   border: "none", borderRadius: 6, cursor: "pointer",
                 }}>Run AI Review</button>
               </div>
             )}
-            {reviewing && <Spinner />}
+            {reviewing && (
+              <div style={{ textAlign: "center", padding: "60px 20px" }}>
+                <Spinner />
+                <p style={{ color: "var(--text-secondary)", marginTop: 12, fontSize: "0.9rem" }}>
+                  Analyzing pull request…
+                </p>
+              </div>
+            )}
             {review && <HybridResultCard data={review} />}
           </>
         )}
       </div>
-
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }

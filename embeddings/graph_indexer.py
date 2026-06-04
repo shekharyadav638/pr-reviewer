@@ -31,27 +31,15 @@ class GraphIndexer:
         self._crg_available = self._check_crg()
 
     def _check_crg(self) -> bool:
-        try:
-            result = subprocess.run(
-                ["crg", "--version"],
-                capture_output=True, text=True,
-            )
-            if result.returncode == 0:
-                logger.info("code-review-graph CLI found: %s",
-                            result.stdout.strip())
-                return True
-        except FileNotFoundError:
-            pass
-        # Try as python module
-        try:
-            result = subprocess.run(
-                ["python", "-m", "code_review_graph", "--version"],
-                capture_output=True, text=True,
-            )
-            if result.returncode == 0:
-                return True
-        except FileNotFoundError:
-            pass
+        for candidate in [["code-review-graph", "--version"],
+                          ["python", "-m", "code_review_graph", "--version"]]:
+            try:
+                result = subprocess.run(candidate, capture_output=True, text=True)
+                if result.returncode == 0:
+                    logger.info("code-review-graph found: %s", result.stdout.strip())
+                    return True
+            except FileNotFoundError:
+                continue
         logger.warning(
             "code-review-graph not found. Install with: "
             "pip install code-review-graph[embeddings]\n"
@@ -60,17 +48,17 @@ class GraphIndexer:
         return False
 
     def _crg_cmd(self) -> list[str]:
-        """Return the crg command prefix."""
+        """Return the code-review-graph command prefix."""
         try:
-            subprocess.run(["crg", "--version"], capture_output=True, check=True)
-            return ["crg"]
+            subprocess.run(["code-review-graph", "--version"],
+                           capture_output=True, check=True)
+            return ["code-review-graph"]
         except (FileNotFoundError, subprocess.CalledProcessError):
             return ["python", "-m", "code_review_graph"]
 
     def build_graph(
         self,
         repo_root: Path,
-        full_rebuild: bool = False,
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> int:
         """
@@ -91,9 +79,7 @@ class GraphIndexer:
 
         _prog(5, "Building AST knowledge graph…")
 
-        cmd = self._crg_cmd() + ["build", str(repo_root)]
-        if full_rebuild:
-            cmd.append("--full-rebuild")
+        cmd = self._crg_cmd() + ["build", "--repo", str(repo_root)]
 
         try:
             result = subprocess.run(
@@ -103,25 +89,22 @@ class GraphIndexer:
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or result.stdout.strip())
-            _prog(60, "Graph built. Computing embeddings…")
+            _prog(70, "Graph built. Running post-processing…")
         except Exception as exc:
             raise RuntimeError(f"Graph build failed: {exc}")
 
-        # Now embed for semantic search (local model, no API key)
+        # Post-process: flows, communities, FTS index
         try:
-            embed_cmd = self._crg_cmd() + ["embed", str(repo_root)]
-            result = subprocess.run(
-                embed_cmd,
-                capture_output=True, text=True,
-                cwd=str(repo_root),
-            )
+            pp_cmd = self._crg_cmd() + ["postprocess", "--repo", str(repo_root)]
+            result = subprocess.run(pp_cmd, capture_output=True, text=True,
+                                    cwd=str(repo_root))
             if result.returncode != 0:
-                logger.warning("Embedding failed (non-fatal): %s",
+                logger.warning("Postprocess failed (non-fatal): %s",
                                result.stderr.strip())
             else:
-                _prog(90, "Embeddings computed.")
+                _prog(90, "Post-processing complete.")
         except Exception as exc:
-            logger.warning("Embedding step failed (non-fatal): %s", exc)
+            logger.warning("Postprocess step failed (non-fatal): %s", exc)
 
         # Get stats
         nodes = self._get_node_count(repo_root)
@@ -132,12 +115,13 @@ class GraphIndexer:
         if not self._crg_available:
             return 0
         try:
-            cmd = self._crg_cmd() + ["stats", str(repo_root), "--json"]
+            cmd = self._crg_cmd() + ["status", "--repo", str(repo_root)]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
-                import json
-                data = json.loads(result.stdout)
-                return data.get("total_nodes", 0)
+                import re
+                m = re.search(r"(\d+)\s+node", result.stdout)
+                if m:
+                    return int(m.group(1))
         except Exception:
             pass
         return 0

@@ -102,13 +102,17 @@ class GraphReviewer:
         repo_slug: str,
         changed_files: list[str],
         file_contents: Optional[dict[str, str]] = None,
+        target_branch: str = "",
     ) -> GraphReviewContext:
         ctx = GraphReviewContext()
 
         if not self._indexer.available:
             return ctx
 
-        repo_root = clone_dir(workspace, repo_slug)
+        # Use the branch-specific clone when it exists, fall back to default.
+        repo_root = clone_dir(workspace, repo_slug, target_branch)
+        if not repo_root.exists():
+            repo_root = clone_dir(workspace, repo_slug)
         if not repo_root.exists():
             logger.debug("No clone found for %s/%s — skipping graph review",
                          workspace, repo_slug)

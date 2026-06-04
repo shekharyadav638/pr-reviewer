@@ -46,6 +46,12 @@ class RepoRecord:
     pr_count: int
     pr_fetch_error: str
 
+    # Multi-branch tracking (JSON arrays stored as TEXT)
+    branches: str           # JSON list of all known branch names, e.g. '["main","develop","stage"]'
+    indexed_branches: str   # JSON list of successfully indexed branches
+    current_branch: str     # branch currently being cloned/indexed (empty when idle)
+    total_branches: int     # how many branches will be indexed in this run
+
     @property
     def full_name(self) -> str:
         return f"{self.workspace}/{self.repo_slug}"
@@ -100,27 +106,49 @@ class RepoStore:
                     pr_count         INTEGER NOT NULL DEFAULT 0,
                     pr_fetch_error   TEXT NOT NULL DEFAULT '',
 
+                    branches         TEXT NOT NULL DEFAULT '[]',
+                    indexed_branches TEXT NOT NULL DEFAULT '[]',
+                    current_branch   TEXT NOT NULL DEFAULT '',
+                    total_branches   INTEGER NOT NULL DEFAULT 0,
+
                     UNIQUE(workspace, repo_slug)
                 )
             """)
             # Migrate older DBs that lack new columns
             self._migrate(conn)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS bitbucket_repo_cache (
+                    full_name   TEXT PRIMARY KEY,
+                    workspace   TEXT NOT NULL,
+                    slug        TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    is_private  INTEGER NOT NULL DEFAULT 0,
+                    language    TEXT NOT NULL DEFAULT '',
+                    updated_on  TEXT NOT NULL DEFAULT '',
+                    size        INTEGER NOT NULL DEFAULT 0,
+                    fetched_at  TEXT NOT NULL
+                )
+            """)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(repos)")}
         new_cols = {
-            "git_url":        "TEXT NOT NULL DEFAULT ''",
-            "default_branch": "TEXT NOT NULL DEFAULT 'main'",
-            "clone_status":   "TEXT NOT NULL DEFAULT 'pending'",
-            "clone_progress": "INTEGER NOT NULL DEFAULT 0",
-            "clone_error":    "TEXT NOT NULL DEFAULT ''",
-            "clone_size_mb":  "REAL NOT NULL DEFAULT 0",
-            "cloned_at":      "TEXT",
-            "graph_status":   "TEXT NOT NULL DEFAULT 'pending'",
-            "graph_progress": "INTEGER NOT NULL DEFAULT 0",
-            "graph_error":    "TEXT NOT NULL DEFAULT ''",
-            "graph_nodes":    "INTEGER NOT NULL DEFAULT 0",
-            "graph_built_at": "TEXT",
+            "git_url":          "TEXT NOT NULL DEFAULT ''",
+            "default_branch":   "TEXT NOT NULL DEFAULT 'main'",
+            "clone_status":     "TEXT NOT NULL DEFAULT 'pending'",
+            "clone_progress":   "INTEGER NOT NULL DEFAULT 0",
+            "clone_error":      "TEXT NOT NULL DEFAULT ''",
+            "clone_size_mb":    "REAL NOT NULL DEFAULT 0",
+            "cloned_at":        "TEXT",
+            "graph_status":     "TEXT NOT NULL DEFAULT 'pending'",
+            "graph_progress":   "INTEGER NOT NULL DEFAULT 0",
+            "graph_error":      "TEXT NOT NULL DEFAULT ''",
+            "graph_nodes":      "INTEGER NOT NULL DEFAULT 0",
+            "graph_built_at":   "TEXT",
+            "branches":         "TEXT NOT NULL DEFAULT '[]'",
+            "indexed_branches": "TEXT NOT NULL DEFAULT '[]'",
+            "current_branch":   "TEXT NOT NULL DEFAULT ''",
+            "total_branches":   "INTEGER NOT NULL DEFAULT 0",
         }
         for col, typedef in new_cols.items():
             if col not in existing:
@@ -153,6 +181,10 @@ class RepoStore:
             pr_fetch_status=d.get("pr_fetch_status", "pending"),
             pr_count=d.get("pr_count", 0),
             pr_fetch_error=d.get("pr_fetch_error", ""),
+            branches=d.get("branches", "[]"),
+            indexed_branches=d.get("indexed_branches", "[]"),
+            current_branch=d.get("current_branch", ""),
+            total_branches=d.get("total_branches", 0),
         )
 
     def add_repo(self, workspace: str, repo_slug: str,
@@ -270,4 +302,88 @@ class RepoStore:
             conn.execute(
                 "UPDATE repos SET default_branch=? WHERE id=?",
                 (branch, repo_id),
+            )
+
+    def update_branches(self, repo_id: int, branches: list[str]) -> None:
+        """Persist the full list of known branches (from Bitbucket API)."""
+        import json
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "UPDATE repos SET branches=? WHERE id=?",
+                (json.dumps(branches), repo_id),
+            )
+
+    def set_current_branch(self, repo_id: int, branch: str,
+                           total: int = 0) -> None:
+        """Mark which branch is currently being processed."""
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "UPDATE repos SET current_branch=?, total_branches=? WHERE id=?",
+                (branch, total, repo_id),
+            )
+
+    # ------------------------------------------------------------------ #
+    # Bitbucket repo catalog cache                                         #
+    # ------------------------------------------------------------------ #
+
+    def save_bb_repo_cache(self, repos: list[dict]) -> None:
+        """Upsert the full Bitbucket repo listing into the cache table."""
+        now = datetime.utcnow().isoformat()
+        with self._lock, self._conn() as conn:
+            conn.execute("DELETE FROM bitbucket_repo_cache")
+            conn.executemany(
+                """INSERT INTO bitbucket_repo_cache
+                   (full_name, workspace, slug, description, is_private,
+                    language, updated_on, size, fetched_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        r.get("full_name", f"{r['workspace']}/{r['slug']}"),
+                        r.get("workspace", ""),
+                        r.get("slug", ""),
+                        r.get("description", "") or "",
+                        1 if r.get("is_private") else 0,
+                        r.get("language", "") or "",
+                        r.get("updated_on", "") or "",
+                        r.get("size", 0) or 0,
+                        now,
+                    )
+                    for r in repos
+                ],
+            )
+
+    def get_bb_repo_cache(self) -> list[dict]:
+        """Return all cached Bitbucket repos, or empty list if none."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM bitbucket_repo_cache ORDER BY workspace, slug"
+            ).fetchall()
+        return [
+            {
+                "full_name":   r["full_name"],
+                "workspace":   r["workspace"],
+                "slug":        r["slug"],
+                "description": r["description"],
+                "is_private":  bool(r["is_private"]),
+                "language":    r["language"],
+                "updated_on":  r["updated_on"],
+                "size":        r["size"],
+                "fetched_at":  r["fetched_at"],
+            }
+            for r in rows
+        ]
+
+    def mark_branch_indexed(self, repo_id: int, branch: str) -> None:
+        """Add branch to the indexed_branches JSON list."""
+        import json
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                "SELECT indexed_branches FROM repos WHERE id=?", (repo_id,)
+            ).fetchone()
+            existing = json.loads(row["indexed_branches"] if row else "[]")
+            if branch not in existing:
+                existing.append(branch)
+            conn.execute(
+                "UPDATE repos SET indexed_branches=? WHERE id=?",
+                (json.dumps(existing), repo_id),
             )

@@ -9,6 +9,7 @@ class Settings:
     bitbucket_app_password: str = ""
     bitbucket_base_url: str = "https://api.bitbucket.org/2.0"
     repositories: list[str] = field(default_factory=list)
+    workspaces: list[str] = field(default_factory=list)  # explicit workspace slugs
 
     pr_fetch_limit: int = 100
     pr_state_filter: list[str] = field(default_factory=lambda: ["MERGED", "DECLINED"])
@@ -28,9 +29,11 @@ class Settings:
 
     @classmethod
     def load(cls, env_path: str | None = None) -> "Settings":
-        load_dotenv(env_path or ".env")
+        load_dotenv(env_path or ".env", override=True)
         repos_raw = os.getenv("BITBUCKET_REPOSITORIES", "")
         repos = [r.strip() for r in repos_raw.split(",") if r.strip()]
+        ws_raw = os.getenv("BITBUCKET_WORKSPACES", "")
+        workspaces = [w.strip() for w in ws_raw.split(",") if w.strip()]
         states_raw = os.getenv("PR_STATE_FILTER", "MERGED,DECLINED")
         states = [s.strip() for s in states_raw.split(",") if s.strip()]
 
@@ -41,6 +44,7 @@ class Settings:
                 "BITBUCKET_BASE_URL", "https://api.bitbucket.org/2.0"
             ),
             repositories=repos,
+            workspaces=workspaces,
             pr_fetch_limit=int(os.getenv("PR_FETCH_LIMIT", "100")),
             pr_state_filter=states,
             model_output_dir=os.getenv("MODEL_OUTPUT_DIR", "models"),

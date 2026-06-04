@@ -1,36 +1,40 @@
 function Section({ title, count, children, defaultOpen = true, accent }) {
   return (
-    <details open={defaultOpen} style={{ marginBottom: 20 }}>
+    <details open={defaultOpen} style={{ marginBottom: 16 }}>
       <summary style={{
-        cursor: "pointer", padding: "8px 0", userSelect: "none",
+        cursor: "pointer", padding: "10px 0 8px", userSelect: "none",
         display: "flex", alignItems: "center", gap: 8,
-        fontSize: "0.82rem", fontWeight: 700, color: "#8c9bab",
+        fontSize: "0.78rem", fontWeight: 700, color: "var(--text-secondary)",
         textTransform: "uppercase", letterSpacing: "0.07em",
-        listStyle: "none",
+        listStyle: "none", borderBottom: "1px solid var(--border)",
       }}>
         <span style={{
           display: "inline-block", width: 3, height: 14, borderRadius: 2,
-          backgroundColor: accent || "#1f6feb", flexShrink: 0,
+          backgroundColor: accent || "var(--blue)", flexShrink: 0,
         }} />
         {title}
         {count != null && (
           <span style={{
-            marginLeft: 4, background: "#21262d", color: "#6b7280",
-            borderRadius: 10, padding: "1px 8px", fontSize: "0.7rem", fontWeight: 600,
+            marginLeft: 4, background: "var(--surface-2)", color: "var(--text-muted)",
+            border: "1px solid var(--border)",
+            borderRadius: 20, padding: "1px 8px", fontSize: "0.7rem", fontWeight: 600,
           }}>{count}</span>
         )}
       </summary>
-      <div style={{ paddingTop: 8 }}>{children}</div>
+      <div style={{ paddingTop: 10 }}>{children}</div>
     </details>
   );
 }
 
-function Chip({ label, color = "#6b7280", bg = "#21262d" }) {
+function Chip({ label, color, bg, border }) {
   return (
     <span style={{
-      display: "inline-block", padding: "2px 8px", borderRadius: 4,
+      display: "inline-block", padding: "2px 8px", borderRadius: 20,
       fontSize: "0.7rem", fontWeight: 700, textTransform: "uppercase",
-      letterSpacing: "0.05em", background: bg, color,
+      letterSpacing: "0.04em",
+      background: bg || "var(--surface-2)",
+      color: color || "var(--text-secondary)",
+      border: `1px solid ${border || "var(--border)"}`,
       marginRight: 6, flexShrink: 0,
     }}>{label}</span>
   );
@@ -38,43 +42,37 @@ function Chip({ label, color = "#6b7280", bg = "#21262d" }) {
 
 function SeverityChip({ severity }) {
   const map = {
-    critical: { color: "#f87171", bg: "#450a0a" },
-    high:     { color: "#f87171", bg: "#450a0a" },
-    error:    { color: "#f87171", bg: "#450a0a" },
-    medium:   { color: "#fb923c", bg: "#431407" },
-    warning:  { color: "#fb923c", bg: "#431407" },
-    low:      { color: "#579dff", bg: "#0d2033" },
-    info:     { color: "#8c9bab", bg: "#21262d" },
+    critical: { color: "var(--red)",    bg: "var(--red-bg)",    border: "var(--red-border)"    },
+    high:     { color: "var(--red)",    bg: "var(--red-bg)",    border: "var(--red-border)"    },
+    error:    { color: "var(--red)",    bg: "var(--red-bg)",    border: "var(--red-border)"    },
+    medium:   { color: "var(--orange)", bg: "var(--orange-bg)", border: "var(--orange-border)" },
+    warning:  { color: "var(--orange)", bg: "var(--orange-bg)", border: "var(--orange-border)" },
+    low:      { color: "var(--blue)",   bg: "var(--blue-bg)",   border: "var(--blue-border)"   },
+    info:     { color: "var(--text-muted)", bg: "var(--surface-2)", border: "var(--border)"    },
   };
   const s = (severity || "info").toLowerCase();
   const c = map[s] || map.info;
-  return <Chip label={severity || "info"} color={c.color} bg={c.bg} />;
+  return <Chip label={severity || "info"} color={c.color} bg={c.bg} border={c.border} />;
 }
 
 function IssueRow({ severity, title, file }) {
-  const borderMap = {
-    critical: "#6b2737", high: "#6b2737", error: "#6b2737",
-    medium: "#78350f", warning: "#78350f",
-  };
-  const bgMap = {
-    critical: "#160b0b", high: "#160b0b", error: "#160b0b",
-    medium: "#160d00", warning: "#160d00",
-  };
   const s = (severity || "").toLowerCase();
+  const isHigh = ["critical", "high", "error"].includes(s);
+  const isMed  = ["medium", "warning"].includes(s);
   return (
     <div style={{
       padding: "9px 12px", borderRadius: 6, marginBottom: 6,
-      background: bgMap[s] || "#0d1117",
-      border: `1px solid ${borderMap[s] || "#21262d"}`,
+      background: isHigh ? "var(--red-bg)" : isMed ? "var(--orange-bg)" : "var(--surface-2)",
+      border: `1px solid ${isHigh ? "var(--red-border)" : isMed ? "var(--orange-border)" : "var(--border)"}`,
     }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
         <SeverityChip severity={severity} />
-        <span style={{ fontSize: "0.85rem", color: "#c9d1d9", flex: 1 }}>{title}</span>
+        <span style={{ fontSize: "0.85rem", color: "var(--text)", flex: 1 }}>{title}</span>
       </div>
       {file && (
         <div style={{
           fontFamily: "monospace", fontSize: "0.75rem",
-          color: "#4b5563", marginTop: 4, paddingLeft: 2,
+          color: "var(--text-muted)", marginTop: 4, paddingLeft: 2,
         }}>{file}</div>
       )}
     </div>
@@ -85,10 +83,10 @@ function MetricBox({ label, value }) {
   return (
     <div style={{
       textAlign: "center", padding: "12px 8px",
-      background: "#161b22", borderRadius: 6, border: "1px solid #21262d",
+      background: "var(--surface-2)", borderRadius: 6, border: "1px solid var(--border)",
     }}>
-      <div style={{ fontSize: "1.3rem", fontWeight: 700, color: "#e2e8f0" }}>{value}</div>
-      <div style={{ fontSize: "0.72rem", color: "#6b7280", textTransform: "capitalize", marginTop: 2 }}>
+      <div style={{ fontSize: "1.2rem", fontWeight: 700, color: "var(--text)" }}>{value}</div>
+      <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", textTransform: "capitalize", marginTop: 2 }}>
         {String(label).replace(/_/g, " ")}
       </div>
     </div>
@@ -96,23 +94,25 @@ function MetricBox({ label, value }) {
 }
 
 function RiskBar({ score, level }) {
-  const color = level === "HIGH" ? "#ef4444" : level === "MEDIUM" ? "#f97316" : "#22c55e";
+  const color  = level === "HIGH" ? "var(--red)" : level === "MEDIUM" ? "var(--orange)" : "var(--green)";
+  const bg     = level === "HIGH" ? "var(--red-bg)" : level === "MEDIUM" ? "var(--orange-bg)" : "var(--green-bg)";
+  const border = level === "HIGH" ? "var(--red-border)" : level === "MEDIUM" ? "var(--orange-border)" : "var(--green-border)";
+  const barFill = level === "HIGH" ? "#cf222e" : level === "MEDIUM" ? "#9a6700" : "#1a7f37";
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <div style={{
-        flex: 1, height: 8, background: "#21262d",
+        flex: 1, height: 8, background: "var(--border)",
         borderRadius: 4, overflow: "hidden", maxWidth: 280,
       }}>
         <div style={{
           width: `${Math.round(score * 100)}%`, height: "100%",
-          background: color, borderRadius: 4, transition: "width 0.4s",
+          background: barFill, borderRadius: 4,
         }} />
       </div>
       <span style={{ fontWeight: 700, fontSize: "1.1rem", color }}>{Math.round(score * 100)}%</span>
       <span style={{
-        padding: "3px 12px", borderRadius: 20, fontWeight: 700, fontSize: "0.85rem",
-        background: level === "HIGH" ? "#450a0a" : level === "MEDIUM" ? "#431407" : "#1a4731",
-        color, border: `1.5px solid ${color}`,
+        padding: "3px 12px", borderRadius: 20, fontWeight: 700, fontSize: "0.82rem",
+        background: bg, color, border: `1.5px solid ${border}`,
       }}>{level}</span>
     </div>
   );
@@ -128,132 +128,191 @@ export default function HybridResultCard({ data }) {
                     + (data.llm_code_smells        || []).length;
 
   return (
-    <div style={{ color: "#c9d1d9" }}>
+    <div style={{ color: "var(--text)", maxWidth: 900 }}>
 
       {/* Risk */}
-      <Section title="Risk Score" accent="#1f6feb">
+      <Section title="Risk Score" accent="var(--blue)">
         <RiskBar score={data.risk_score} level={data.risk_level} />
+        {data.llm_summary && (
+          <p style={{ margin: "10px 0 0", fontSize: "0.85rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+            {data.llm_summary}
+          </p>
+        )}
       </Section>
 
       {/* ML & Rules */}
-      <Section
-        title="ML & Rule Analysis"
-        count={(data.ml_reasons || []).length + (data.rule_issues || []).length}
-        accent="#7c3aed"
-      >
-        {(data.ml_reasons || []).map((r, i) => (
-          <div key={i} style={{ fontSize: "0.85rem", color: "#8c9bab", marginBottom: 4, paddingLeft: 4 }}>
-            · {r}
-          </div>
-        ))}
-        {(data.rule_issues || []).map((issue, i) => (
-          <IssueRow key={i} severity={issue.severity} title={`${issue.category} — ${issue.description}`} />
-        ))}
-        {!data.ml_reasons?.length && !data.rule_issues?.length && (
-          <span style={{ fontSize: "0.83rem", color: "#4b5563" }}>No ML or rule findings.</span>
-        )}
-      </Section>
-
-      {/* LLM Review */}
-      <Section title="AI Code Review" count={llmTotal} accent="#0891b2">
-        {data.llm_summary && (
-          <div style={{
-            padding: "10px 12px", borderRadius: 6, marginBottom: 10,
-            background: "#0d2033", border: "1px solid #1f6feb",
-            fontSize: "0.85rem", color: "#c9d1d9",
-          }}>
-            <strong style={{ color: "#579dff" }}>Summary:</strong> {data.llm_summary}
-          </div>
-        )}
-        {(data.llm_detected_issues || []).map((i, idx) => (
-          <IssueRow key={idx} severity={i.severity} title={i.description} file={i.file} />
-        ))}
-        {(data.llm_security_concerns || []).map((i, idx) => (
-          <IssueRow key={`sec-${idx}`} severity={i.severity || "high"} title={i.description} file={i.file} />
-        ))}
-        {(data.llm_performance_concerns || []).map((i, idx) => (
-          <IssueRow key={`perf-${idx}`} severity={i.severity || "medium"} title={i.description} file={i.file} />
-        ))}
-        {(data.llm_code_smells || []).map((i, idx) => (
-          <IssueRow key={`smell-${idx}`} severity={i.severity || "low"} title={i.description} file={i.file} />
-        ))}
-        {llmTotal === 0 && !data.llm_summary && (
-          <span style={{ fontSize: "0.83rem", color: "#4b5563" }}>LLM analysis not available.</span>
-        )}
-        {(data.llm_improvements || []).length > 0 && (
-          <div style={{ marginTop: 10 }}>
-            <div style={{ fontSize: "0.75rem", color: "#6b7280", fontWeight: 700, marginBottom: 6, textTransform: "uppercase" }}>
-              Suggested Improvements
+      {((data.ml_reasons || []).length > 0 || (data.rule_issues || []).length > 0) && (
+        <Section
+          title="ML & Rule Analysis"
+          count={(data.ml_reasons || []).length + (data.rule_issues || []).length}
+          accent="var(--purple)"
+        >
+          {(data.ml_reasons || []).map((r, i) => (
+            <div key={i} style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: 4, paddingLeft: 4 }}>
+              · {r}
             </div>
-            {data.llm_improvements.map((imp, i) => (
-              <div key={i} style={{ fontSize: "0.83rem", color: "#8c9bab", marginBottom: 4, paddingLeft: 4 }}>
-                · {imp.description}
-                {imp.file && <span style={{ fontFamily: "monospace", fontSize: "0.75rem", color: "#4b5563" }}> ({imp.file})</span>}
+          ))}
+          {(data.rule_issues || []).map((issue, i) => (
+            <IssueRow
+              key={i}
+              severity={issue.severity}
+              title={issue.description || issue.message || JSON.stringify(issue)}
+              file={issue.files?.join(", ")}
+            />
+          ))}
+        </Section>
+      )}
+
+      {/* LLM */}
+      {llmTotal > 0 && (
+        <Section title="AI Code Review" count={llmTotal} accent="var(--blue)">
+          {(data.llm_detected_issues || []).map((i, idx) => (
+            <IssueRow key={idx} severity={i.severity} title={i.description} file={i.file} />
+          ))}
+          {(data.llm_security_concerns || []).length > 0 && (
+            <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--red)", margin: "8px 0 4px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Security
+            </div>
+          )}
+          {(data.llm_security_concerns || []).map((i, idx) => (
+            <IssueRow key={idx} severity={i.severity || "high"} title={i.description} file={i.file} />
+          ))}
+          {(data.llm_performance_concerns || []).length > 0 && (
+            <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--orange)", margin: "8px 0 4px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Performance
+            </div>
+          )}
+          {(data.llm_performance_concerns || []).map((i, idx) => (
+            <IssueRow key={idx} severity={i.severity || "medium"} title={i.description} file={i.file} />
+          ))}
+          {(data.llm_code_smells || []).length > 0 && (
+            <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--text-muted)", margin: "8px 0 4px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Code Smells
+            </div>
+          )}
+          {(data.llm_code_smells || []).map((i, idx) => (
+            <IssueRow key={idx} severity={i.severity || "low"} title={i.description} file={i.file} />
+          ))}
+          {(data.llm_improvements || []).length > 0 && (
+            <>
+              <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--text-secondary)", margin: "8px 0 4px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Suggested Improvements
               </div>
-            ))}
-          </div>
-        )}
-      </Section>
+              {(data.llm_improvements || []).map((imp, idx) => (
+                <div key={idx} style={{
+                  fontSize: "0.84rem", color: "var(--text-secondary)", marginBottom: 4,
+                  padding: "6px 10px", background: "var(--surface-2)", borderRadius: 5,
+                  border: "1px solid var(--border)",
+                }}>
+                  · {imp.description}
+                  {imp.file && (
+                    <span style={{ fontFamily: "monospace", fontSize: "0.75rem", color: "var(--text-muted)", marginLeft: 8 }}>
+                      {imp.file}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </>
+          )}
+        </Section>
+      )}
 
-      {/* Security */}
-      <Section title="Dependency Security" count={vulnCount} accent="#ef4444">
+      {/* Dependency Security */}
+      <Section
+        title="Dependency Security"
+        count={vulnCount}
+        accent="var(--red)"
+        defaultOpen={vulnCount > 0}
+      >
         {vulnCount === 0 ? (
-          <span style={{ fontSize: "0.83rem", color: "#22c55e" }}>✓ No vulnerable dependencies detected</span>
-        ) : (data.security_warnings || []).map((v, i) => (
-          <IssueRow
-            key={i} severity={v.severity}
-            title={`${v.package}@${v.version} — ${v.vuln_id}: ${v.summary}`}
-          />
-        ))}
-      </Section>
-
-      {/* Static analysis */}
-      <Section title="Static Analysis" count={staticCount} accent="#f59e0b">
-        {data.static_tools_run?.length > 0 && (
-          <div style={{ fontSize: "0.75rem", color: "#4b5563", marginBottom: 8 }}>
-            Tools: {data.static_tools_run.join(", ")}
-            {data.static_tools_unavailable?.length > 0 && ` · Unavailable: ${data.static_tools_unavailable.join(", ")}`}
+          <div style={{ fontSize: "0.85rem", color: "var(--green)", padding: "4px 0" }}>
+            ✓ No vulnerable dependencies detected
           </div>
+        ) : (
+          (data.security_warnings || []).map((v, i) => (
+            <IssueRow
+              key={i}
+              severity={v.severity}
+              title={`${v.package_name}@${v.installed_version}: ${v.summary}`}
+              file={v.fixed_version ? `Fix: upgrade to ${v.fixed_version}` : null}
+            />
+          ))
         )}
-        {staticCount === 0 ? (
-          <span style={{ fontSize: "0.83rem", color: "#22c55e" }}>✓ No static analysis issues</span>
-        ) : (data.static_analysis_issues || []).map((i, idx) => (
-          <IssueRow key={idx} severity={i.severity} title={`[${i.rule}] ${i.message}`} file={`${i.file}:${i.line}`} />
-        ))}
       </Section>
 
-      {/* Duplicate warnings */}
+      {/* Static Analysis */}
+      <Section
+        title="Static Analysis"
+        count={staticCount}
+        accent="var(--orange)"
+        defaultOpen={staticCount > 0}
+      >
+        {staticCount === 0 ? (
+          <div style={{ fontSize: "0.85rem", color: "var(--green)", padding: "4px 0" }}>
+            ✓ No static analysis issues
+          </div>
+        ) : (
+          (data.static_analysis_issues || []).map((i, idx) => (
+            <IssueRow
+              key={idx}
+              severity={i.severity}
+              title={`[${i.rule || i.tool}] ${i.message}`}
+              file={i.file ? `${i.file}${i.line ? `:${i.line}` : ""}` : null}
+            />
+          ))
+        )}
+      </Section>
+
+      {/* Code Reuse Opportunities */}
       {dupCount > 0 && (
-        <Section title="Code Reuse Opportunities" count={dupCount} accent="#f59e0b">
+        <Section title="Code Reuse Opportunities" count={dupCount} accent="var(--orange)">
           {(data.duplicate_warnings || []).map((w, i) => (
             <div key={i} style={{
-              padding: "10px 12px", borderRadius: 6, marginBottom: 8,
-              background: "#160d00", border: "1px solid #78350f",
+              padding: "12px 14px", borderRadius: 8, marginBottom: 8,
+              background: "var(--orange-bg)", border: "1px solid var(--orange-border)",
             }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
                 <Chip
                   label={`${Math.round(w.similarity * 100)}% similar`}
-                  color="#fb923c" bg="#431407"
+                  color="var(--orange)" bg="var(--orange-bg)" border="var(--orange-border)"
                 />
-                <span style={{ fontSize: "0.85rem", color: "#c9d1d9", fontWeight: 600 }}>
+                <span style={{ fontSize: "0.85rem", color: "var(--text)", fontWeight: 600 }}>
                   {w.new_chunk_name || w.new_filepath}
                 </span>
               </div>
-              <div style={{ fontSize: "0.8rem", color: "#8c9bab" }}>
-                Similar to <code style={{
-                  background: "#21262d", padding: "1px 5px", borderRadius: 3,
-                  fontFamily: "monospace", fontSize: "0.78rem",
+
+              {/* PR file (where the duplicate is in this PR) */}
+              <div style={{
+                fontSize: "0.8rem", color: "var(--text-secondary)", marginBottom: 4,
+                display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
+              }}>
+                <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>In this PR:</span>
+                <code style={{
+                  background: "var(--surface)", border: "1px solid var(--border)",
+                  padding: "1px 6px", borderRadius: 4,
+                  fontFamily: "monospace", fontSize: "0.78rem", color: "var(--blue)",
+                }}>{w.new_filepath}</code>
+              </div>
+
+              {/* Existing file */}
+              <div style={{ fontSize: "0.8rem", color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>Already exists in:</span>
+                <code style={{
+                  background: "var(--surface)", border: "1px solid var(--border)",
+                  padding: "1px 6px", borderRadius: 4,
+                  fontFamily: "monospace", fontSize: "0.78rem", color: "var(--text-secondary)",
                 }}>{w.existing_name || w.existing_filepath}</code>
-                {" in "}
-                <span style={{ fontFamily: "monospace", fontSize: "0.78rem", color: "#6b7280" }}>
+                <span style={{ fontFamily: "monospace", fontSize: "0.75rem", color: "var(--text-muted)" }}>
                   {w.existing_filepath}
                 </span>
               </div>
+
               {w.existing_code_snippet && (
                 <pre style={{
-                  margin: "6px 0 0", fontSize: "0.73rem", color: "#6b7280",
-                  background: "#0d1117", padding: "6px 8px", borderRadius: 4,
-                  overflow: "auto", maxHeight: 80, whiteSpace: "pre-wrap",
+                  margin: "8px 0 0", fontSize: "0.73rem", color: "var(--text-secondary)",
+                  background: "var(--surface)", border: "1px solid var(--border)",
+                  padding: "8px 10px", borderRadius: 5,
+                  overflow: "auto", maxHeight: 100, whiteSpace: "pre-wrap",
                 }}>{w.existing_code_snippet}</pre>
               )}
             </div>
@@ -269,91 +328,38 @@ export default function HybridResultCard({ data }) {
             (data.graph_context.affected_functions || []).length +
             (data.graph_context.affected_flows || []).length
           }
-          accent="#06b6d4"
+          accent="#0891b2"
         >
           {data.graph_context.impact_summary && (
             <div style={{
-              fontSize: "0.85rem", color: "#8c9bab", marginBottom: 10,
-              padding: "8px 12px", background: "#0d1f2d",
-              borderRadius: 6, border: "1px solid #164e63",
+              fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: 10,
+              padding: "8px 12px", background: "#f0f9ff",
+              borderRadius: 6, border: "1px solid #7dd3fc",
             }}>
               {data.graph_context.impact_summary}
             </div>
           )}
-
           {(data.graph_context.affected_functions || []).length > 0 && (
             <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: "0.72rem", color: "#4b5563", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 5 }}>
+              <div style={{ fontSize: "0.72rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>
                 Affected Functions ({data.graph_context.affected_functions.length})
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
                 {data.graph_context.affected_functions.slice(0, 12).map((fn, i) => (
-                  <span key={i} style={{
-                    background: "#0d1f2d", border: "1px solid #164e63",
+                  <code key={i} style={{
+                    background: "#f0f9ff", border: "1px solid #7dd3fc",
                     borderRadius: 4, padding: "2px 8px",
-                    fontFamily: "monospace", fontSize: "0.78rem", color: "#67e8f9",
-                  }}>{fn.name || fn}</span>
-                ))}
-                {data.graph_context.affected_functions.length > 12 && (
-                  <span style={{ fontSize: "0.78rem", color: "#4b5563" }}>
-                    +{data.graph_context.affected_functions.length - 12} more
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
-
-          {(data.graph_context.affected_flows || []).length > 0 && (
-            <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: "0.72rem", color: "#4b5563", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 5 }}>
-                Execution Flows ({data.graph_context.affected_flows.length})
-              </div>
-              {data.graph_context.affected_flows.slice(0, 5).map((flow, i) => (
-                <div key={i} style={{
-                  display: "flex", alignItems: "center", gap: 8,
-                  padding: "5px 10px", borderRadius: 5, marginBottom: 4,
-                  background: "#0d1117", border: "1px solid #21262d",
-                  fontSize: "0.82rem",
-                }}>
-                  <span style={{ fontFamily: "monospace", color: "#67e8f9", flex: 1 }}>
-                    {flow.name || flow}
-                  </span>
-                  {flow.depth != null && (
-                    <span style={{ fontSize: "0.72rem", color: "#4b5563" }}>depth: {flow.depth}</span>
-                  )}
-                  {flow.criticality > 0.7 && (
-                    <span style={{
-                      background: "#450a0a", color: "#f87171",
-                      borderRadius: 4, padding: "1px 6px", fontSize: "0.68rem", fontWeight: 700,
-                    }}>CRITICAL</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {(data.graph_context.affected_communities || []).length > 0 && (
-            <div>
-              <div style={{ fontSize: "0.72rem", color: "#4b5563", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 5 }}>
-                Affected Modules
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                {data.graph_context.affected_communities.map((c, i) => (
-                  <span key={i} style={{
-                    background: "#1a2035", border: "1px solid #1e3a5f",
-                    borderRadius: 4, padding: "2px 8px",
-                    fontSize: "0.78rem", color: "#93c5fd",
-                  }}>{c}</span>
+                    fontFamily: "monospace", fontSize: "0.78rem", color: "#0369a1",
+                  }}>{fn.name || fn}</code>
                 ))}
               </div>
             </div>
           )}
-
           {data.graph_context.risk_score_boost > 0 && (
             <div style={{
-              marginTop: 10, padding: "6px 10px", borderRadius: 5,
-              background: "#2d1515", border: "1px solid #6b2737",
-              fontSize: "0.8rem", color: "#f87171",
+              marginTop: 8, padding: "6px 10px", borderRadius: 5,
+              background: "var(--red-bg)", border: "1px solid var(--red-border)",
+              fontSize: "0.8rem", color: "var(--red)",
             }}>
               ⚠ Risk boosted +{(data.graph_context.risk_score_boost * 100).toFixed(0)}% due to critical execution flows
             </div>
@@ -363,23 +369,29 @@ export default function HybridResultCard({ data }) {
 
       {/* Recommendations */}
       {(data.recommendations || []).length > 0 && (
-        <Section title="Recommendations" accent="#22c55e">
+        <Section title="Recommendations" accent="var(--green)">
           {data.recommendations.map((r, i) => (
-            <div key={i} style={{ fontSize: "0.85rem", color: "#8c9bab", marginBottom: 5, paddingLeft: 4 }}>
-              → {r}
+            <div key={i} style={{
+              fontSize: "0.85rem", color: "var(--text-secondary)",
+              marginBottom: 5, paddingLeft: 4, display: "flex", gap: 6,
+            }}>
+              <span style={{ color: "var(--blue)", fontWeight: 700 }}>→</span>
+              {r}
             </div>
           ))}
         </Section>
       )}
 
       {/* Metrics */}
-      <Section title="Metrics" defaultOpen={false} accent="#4b5563">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(110px,1fr))", gap: 8 }}>
-          {Object.entries(data.metrics || {}).map(([k, v]) => (
-            <MetricBox key={k} label={k} value={v} />
-          ))}
-        </div>
-      </Section>
+      {Object.keys(data.metrics || {}).length > 0 && (
+        <Section title="Metrics" defaultOpen={false} accent="var(--text-muted)">
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(110px,1fr))", gap: 8 }}>
+            {Object.entries(data.metrics || {}).map(([k, v]) => (
+              <MetricBox key={k} label={k} value={v} />
+            ))}
+          </div>
+        </Section>
+      )}
     </div>
   );
 }
