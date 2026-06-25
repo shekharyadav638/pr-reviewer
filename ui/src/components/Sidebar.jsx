@@ -1,330 +1,208 @@
-import { useState } from "react";
-import { addRepo, deleteRepo, indexRepo, fetchRepoPRs, syncRepo } from "../api/client";
+import { Icon } from '@iconify/react';
+import { NavLink, Link, useNavigate, useLocation } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { listRepos } from '../api/client';
 
-const STATUS_CFG = {
-  pending:  { color: "#6b7280", label: "Not indexed" },
-  indexing: { color: "#f59e0b", label: "Indexing…"  },
-  indexed:  { color: "#22c55e", label: "Indexed"     },
-  error:    { color: "#ef4444", label: "Error"       },
-};
+export default function Sidebar() {
+  const [repos, setRepos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedRepo, setExpandedRepo] = useState(null);
+  
+  const navigate = useNavigate();
+  const location = useLocation();
 
-function RepoDot({ status }) {
-  const c = STATUS_CFG[status] || STATUS_CFG.pending;
-  return (
-    <span title={c.label} style={{
-      width: 8, height: 8, borderRadius: "50%",
-      backgroundColor: c.color, flexShrink: 0, display: "inline-block",
-    }} />
-  );
-}
+  // Simple query param parsing to highlight active repo
+  const searchParams = new URLSearchParams(location.search);
+  const activeRepoId = searchParams.get('repoId');
 
-function NavItem({ icon, label, active, onClick, badge }) {
-  return (
-    <div
-      onClick={onClick}
-      style={{
-        display: "flex", alignItems: "center", gap: 10,
-        padding: "7px 14px 7px 20px", cursor: "pointer", userSelect: "none",
-        backgroundColor: active ? "rgba(255,255,255,0.07)" : "transparent",
-        borderLeft: active ? "3px solid #579dff" : "3px solid transparent",
-        borderRadius: "0 6px 6px 0",
-        transition: "background 0.12s",
-        fontSize: "0.85rem", color: active ? "#e2e8f0" : "#8c9bab",
-      }}
-      onMouseEnter={e => { if (!active) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.04)"; }}
-      onMouseLeave={e => { if (!active) e.currentTarget.style.backgroundColor = "transparent"; }}
-    >
-      <span style={{ fontSize: "0.9rem", width: 16, textAlign: "center" }}>{icon}</span>
-      <span style={{ flex: 1 }}>{label}</span>
-      {badge != null && badge > 0 && (
-        <span style={{
-          backgroundColor: "#334155", color: "#94a3b8",
-          borderRadius: 10, padding: "1px 7px", fontSize: "0.7rem", fontWeight: 600,
-        }}>{badge}</span>
-      )}
-    </div>
-  );
-}
+  useEffect(() => {
+    if (activeRepoId && expandedRepo !== activeRepoId) {
+      setExpandedRepo(activeRepoId);
+    }
+  }, [activeRepoId]);
 
-export default function Sidebar({
-  repos, selectedRepoId, selectedView,
-  onSelectRepo, onSelectPRs, onSelectSource, onReposChanged, onError,
-}) {
-  const [addOpen, setAddOpen]   = useState(false);
-  const [repoUrl, setRepoUrl]   = useState("");
-  const [adding, setAdding]     = useState(false);
-  const [expanded, setExpanded] = useState(null);
-  const [syncing, setSyncing]   = useState(null); // repoId being synced
+  useEffect(() => {
+    async function fetchRepos() {
+      try {
+        const data = await listRepos();
+        setRepos(data);
+      } catch (err) {
+        console.error("Failed to load connected repos:", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchRepos();
+  }, [location.pathname]); // refetch when navigating
 
-  async function handleAdd(e) {
-    e.preventDefault();
-    if (!repoUrl.trim()) return;
-    setAdding(true);
-    try {
-      await addRepo(repoUrl.trim());
-      setRepoUrl(""); setAddOpen(false); onReposChanged();
-    } catch (err) { onError(err.message); }
-    finally { setAdding(false); }
-  }
-
-  async function handleIndex(e, repo) {
+  const toggleRepo = (e, repoId) => {
     e.stopPropagation();
-    try { await indexRepo(repo.id); onReposChanged(); }
-    catch (err) { onError(err.message); }
-  }
-
-  async function handleFetch(e, repo) {
-    e.stopPropagation();
-    try { await fetchRepoPRs(repo.id); onReposChanged(); }
-    catch (err) { onError(err.message); }
-  }
-
-  async function handleSync(e, repo) {
-    e.stopPropagation();
-    setSyncing(repo.id);
-    try { await syncRepo(repo.id); onReposChanged(); }
-    catch (err) { onError(err.message); }
-    finally { setSyncing(null); }
-  }
-
-  async function handleDelete(e, repo) {
-    e.stopPropagation();
-    if (!window.confirm(`Remove "${repo.display_name}"?`)) return;
-    try {
-      await deleteRepo(repo.id);
-      if (selectedRepoId === repo.id) onSelectRepo(null);
-      onReposChanged();
-    } catch (err) { onError(err.message); }
-  }
-
-  function toggleExpand(id) {
-    setExpanded(prev => prev === id ? null : id);
-  }
+    setExpandedRepo(expandedRepo === String(repoId) ? null : String(repoId));
+  };
 
   return (
-    <aside style={{
-      width: 240, minWidth: 240, backgroundColor: "#161b22",
-      display: "flex", flexDirection: "column", height: "100vh",
-      overflowY: "auto", borderRight: "1px solid #21262d", flexShrink: 0,
-    }}>
-      {/* Logo */}
-      <div style={{
-        padding: "16px 16px 14px", borderBottom: "1px solid #21262d",
-        display: "flex", alignItems: "center", gap: 10,
-      }}>
-        <div style={{
-          width: 30, height: 30, borderRadius: 6,
-          background: "linear-gradient(135deg,#7c3aed,#2563eb)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: "1rem", flexShrink: 0,
-        }}>🛡</div>
-        <div>
-          <div style={{ fontWeight: 700, fontSize: "0.92rem", color: "#e2e8f0" }}>
-            PR Guardian
+    <aside className="w-[320px] bg-white border-r border-slate-200 flex flex-col flex-shrink-0 z-10 h-screen">
+      {/* Header / Branding */}
+      <div className="h-16 flex items-center px-5 border-b border-slate-100">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-[8px] bg-gradient-to-br from-indigo-500 to-brand-500 flex items-center justify-center shadow-[0_2px_4px_rgba(37,99,235,0.2)]">
+            <Icon icon="lucide:shield" className="text-white text-[18px]" />
           </div>
-          <div style={{ fontSize: "0.68rem", color: "#4b5563" }}>Code review platform</div>
+          <div className="flex flex-col justify-center">
+            <span className="text-[14px] font-semibold tracking-tight text-slate-900 leading-none mb-1">
+              PR Guardian
+            </span>
+            <span className="text-[11px] text-slate-500 leading-none">AI code review</span>
+          </div>
         </div>
       </div>
 
-      {/* Section label + add button */}
-      <div style={{
-        padding: "14px 14px 4px",
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-      }}>
-        <span style={{
-          fontSize: "0.68rem", fontWeight: 700, color: "#4b5563",
-          textTransform: "uppercase", letterSpacing: "0.1em",
-        }}>Repositories</span>
-        <button
-          onClick={() => setAddOpen(v => !v)}
-          title="Add repository"
-          style={{
-            background: "none", border: "none", cursor: "pointer",
-            color: addOpen ? "#579dff" : "#4b5563", fontSize: "1.1rem",
-            lineHeight: 1, padding: "2px 4px", borderRadius: 4,
-            transition: "color 0.15s",
-          }}
-        >+</button>
-      </div>
+      {/* Sidebar Scrollable Content */}
+      <div className="flex-1 overflow-y-auto px-3 py-4 flex flex-col gap-6">
+        {/* Global Action */}
+        <div className="px-2">
+          <NavLink
+            to="/repos"
+            className={({ isActive }) =>
+              `flex items-center gap-2.5 px-3 py-2 text-[13px] font-medium rounded-md transition-colors border ` +
+              (isActive
+                ? 'bg-brand-50 border-brand-100 text-brand-700'
+                : 'text-slate-700 bg-slate-50 border-slate-200 hover:bg-slate-100 hover:text-slate-900')
+            }
+          >
+            <Icon icon="mdi:bitbucket" className="text-[#0052CC] text-lg" />
+            Browse Bitbucket
+          </NavLink>
+        </div>
 
-      {/* Add repo input */}
-      {addOpen && (
-        <form onSubmit={handleAdd} style={{ padding: "4px 12px 10px" }}>
-          <input
-            autoFocus value={repoUrl}
-            onChange={e => setRepoUrl(e.target.value)}
-            placeholder="workspace/repo or Bitbucket URL"
-            disabled={adding}
-            style={{
-              width: "100%", boxSizing: "border-box",
-              padding: "7px 10px", fontSize: "0.8rem",
-              background: "#0d1117", color: "#e2e8f0",
-              border: "1px solid #30363d", borderRadius: 6, outline: "none",
-              marginBottom: 6,
-            }}
-          />
-          <div style={{ display: "flex", gap: 6 }}>
-            <button type="submit" disabled={adding || !repoUrl.trim()} style={{
-              flex: 1, padding: "6px 0", fontSize: "0.78rem", fontWeight: 600,
-              backgroundColor: "#1f6feb", color: "#fff",
-              border: "none", borderRadius: 5, cursor: "pointer",
-            }}>
-              {adding ? "Adding…" : "Add"}
+        {/* Repositories List */}
+        <div>
+          <div className="flex items-center justify-between px-3 mb-2">
+            <h3 className="text-[11px] font-semibold text-slate-400 tracking-wider uppercase">
+              My Repos
+            </h3>
+            <button
+              onClick={() => navigate('/repos')}
+              className="w-5 h-5 flex items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors"
+            >
+              <Icon icon="lucide:plus" className="text-[14px]" />
             </button>
-            <button type="button" onClick={() => setAddOpen(false)} style={{
-              padding: "6px 10px", fontSize: "0.78rem",
-              backgroundColor: "#21262d", color: "#8c9bab",
-              border: "1px solid #30363d", borderRadius: 5, cursor: "pointer",
-            }}>✕</button>
           </div>
-        </form>
-      )}
 
-      {/* Repo list */}
-      <nav style={{ flex: 1, paddingBottom: 16 }}>
-        {repos.length === 0 && (
-          <p style={{ padding: "10px 16px", fontSize: "0.8rem", color: "#4b5563" }}>
-            No repos yet. Click + to add one.
-          </p>
-        )}
-
-        {repos.map(repo => {
-          const isExpanded = expanded === repo.id;
-          const isSelected = selectedRepoId === repo.id;
-
-          return (
-            <div key={repo.id}>
-              {/* Repo row */}
-              <div
-                onClick={() => { onSelectRepo(repo.id); toggleExpand(repo.id); }}
-                style={{
-                  display: "flex", alignItems: "center", gap: 8,
-                  padding: "8px 12px 8px 14px", cursor: "pointer",
-                  backgroundColor: isSelected ? "rgba(255,255,255,0.05)" : "transparent",
-                  borderLeft: isSelected ? "3px solid #579dff" : "3px solid transparent",
-                  transition: "background 0.12s",
-                }}
-                onMouseEnter={e => { if (!isSelected) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.03)"; }}
-                onMouseLeave={e => { if (!isSelected) e.currentTarget.style.backgroundColor = "transparent"; }}
-              >
-                <RepoDot status={repo.index_status} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{
-                    fontSize: "0.84rem", fontWeight: 500, color: "#c9d1d9",
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>{repo.repo_slug}</div>
-                  <div style={{ fontSize: "0.7rem", color: "#4b5563" }}>{repo.workspace}</div>
-                </div>
-                <span style={{
-                  color: "#4b5563", fontSize: "0.6rem",
-                  transform: isExpanded ? "rotate(90deg)" : "none",
-                  transition: "transform 0.15s",
-                }}>▶</span>
-              </div>
-
-              {/* Progress bar while indexing */}
-              {repo.index_status === "indexing" && (
-                <div style={{ margin: "0 14px 4px", height: 3, background: "#21262d", borderRadius: 2 }}>
-                  <div style={{
-                    width: `${repo.index_progress}%`, height: "100%",
-                    background: "#1f6feb", borderRadius: 2, transition: "width 0.3s",
-                  }} />
-                </div>
-              )}
-
-              {/* Sub-menu */}
-              {isExpanded && (
-                <div style={{ background: "#0d1117", borderBottom: "1px solid #21262d" }}>
-                  <NavItem
-                    icon="📁" label="Source"
-                    active={isSelected && selectedView === "source"}
-                    onClick={() => onSelectSource && onSelectSource(repo.id)}
-                  />
-                  <NavItem
-                    icon="📋" label="Pull Requests"
-                    badge={repo.pr_count}
-                    active={isSelected && selectedView === "prs"}
-                    onClick={() => onSelectPRs(repo.id)}
-                  />
-
-                  {/* Clone / graph status */}
-                  {(repo.clone_status === "cloning" || repo.graph_status === "building") && (
-                    <div style={{ padding: "2px 14px 4px", fontSize: "0.7rem", color: "#8b949e" }}>
-                      {repo.clone_status === "cloning"
-                        ? `Cloning… ${repo.clone_progress}%`
-                        : `Building graph… ${repo.graph_progress}%`}
-                      <div style={{ marginTop: 4, height: 2, background: "#21262d", borderRadius: 2 }}>
-                        <div style={{
-                          width: `${repo.clone_status === "cloning" ? repo.clone_progress : repo.graph_progress}%`,
-                          height: "100%", background: "#f59e0b", borderRadius: 2, transition: "width 0.3s",
-                        }} />
+          <div className="space-y-0.5">
+            {loading ? (
+              <div className="px-3 py-2 text-[12px] text-slate-400">Loading...</div>
+            ) : repos.length === 0 ? (
+              <div className="px-3 py-2 text-[12px] text-slate-400">No repositories connected.</div>
+            ) : (
+              repos.map((repo) => {
+                const isExpanded = expandedRepo === String(repo.id);
+                
+                return (
+                  <div key={repo.id} className="mb-1">
+                    <div
+                      onClick={(e) => toggleRepo(e, repo.id)}
+                      className={`px-3 py-2 rounded-md group cursor-pointer transition-colors border ${
+                        isExpanded
+                          ? 'bg-slate-50 border-slate-200'
+                          : 'border-transparent hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-start gap-2.5">
+                          <Icon 
+                            icon={isExpanded ? "lucide:chevron-down" : "lucide:chevron-right"} 
+                            className="text-slate-400 text-[14px] mt-0.5"
+                          />
+                          <div>
+                            <div
+                              className={`text-[13px] font-medium leading-tight ${
+                                isExpanded ? 'text-slate-900' : 'text-slate-700 group-hover:text-slate-900'
+                              }`}
+                            >
+                              {repo.repo_slug}
+                            </div>
+                            <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1">
+                              {repo.workspace}
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  )}
-
-                  {/* Action buttons */}
-                  <div style={{ padding: "6px 14px 8px", display: "flex", flexWrap: "wrap", gap: 5 }}>
-                    <button
-                      onClick={e => handleIndex(e, repo)}
-                      disabled={repo.index_status === "indexing" || repo.clone_status === "cloning"}
-                      style={{
-                        padding: "4px 10px", fontSize: "0.72rem", fontWeight: 600,
-                        border: "1px solid #1f6feb", borderRadius: 4, cursor: "pointer",
-                        backgroundColor: "transparent", color: "#579dff",
-                        opacity: (repo.index_status === "indexing" || repo.clone_status === "cloning") ? 0.5 : 1,
-                      }}
-                    >
-                      {repo.index_status === "indexing"
-                        ? `${repo.index_progress}%…`
-                        : repo.index_status === "indexed" ? "Re-index" : "Build Index"}
-                    </button>
-                    <button
-                      onClick={e => handleSync(e, repo)}
-                      disabled={syncing === repo.id || repo.clone_status === "cloning"}
-                      style={{
-                        padding: "4px 10px", fontSize: "0.72rem", fontWeight: 600,
-                        border: "1px solid #30363d", borderRadius: 4, cursor: "pointer",
-                        backgroundColor: "transparent", color: "#8c9bab",
-                        opacity: (syncing === repo.id || repo.clone_status === "cloning") ? 0.5 : 1,
-                      }}
-                    >
-                      {syncing === repo.id ? "Syncing…" : "↻ Sync"}
-                    </button>
-                    <button
-                      onClick={e => handleFetch(e, repo)}
-                      disabled={repo.pr_fetch_status === "fetching"}
-                      style={{
-                        padding: "4px 10px", fontSize: "0.72rem", fontWeight: 600,
-                        border: "1px solid #30363d", borderRadius: 4, cursor: "pointer",
-                        backgroundColor: "transparent", color: "#8c9bab",
-                        opacity: repo.pr_fetch_status === "fetching" ? 0.5 : 1,
-                      }}
-                    >
-                      {repo.pr_fetch_status === "fetching" ? "Fetching…" : "Fetch PRs"}
-                    </button>
-                    <button
-                      onClick={e => handleDelete(e, repo)}
-                      style={{
-                        padding: "4px 10px", fontSize: "0.72rem", fontWeight: 600,
-                        border: "1px solid #6b2737", borderRadius: 4, cursor: "pointer",
-                        backgroundColor: "transparent", color: "#f87171",
-                      }}
-                    >Remove</button>
+                    
+                    {/* Sub-menu options */}
+                    {isExpanded && (
+                      <div className="ml-7 mt-1 space-y-0.5 pl-1 border-l-2 border-slate-100">
+                        <NavLink
+                          to={`/pr-list?repoId=${repo.id}`}
+                          className={({ isActive }) => 
+                            `flex items-center gap-2 px-3 py-1.5 text-[12px] font-medium rounded-md transition-colors ${
+                              location.pathname === '/pr-list' && activeRepoId === String(repo.id)
+                                ? 'bg-brand-50 text-brand-700' 
+                                : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                            }`
+                          }
+                        >
+                          <Icon icon="lucide:git-pull-request" className="text-[14px]" />
+                          Pull Requests
+                        </NavLink>
+                        
+                        <NavLink
+                          to={`/source?repoId=${repo.id}`}
+                          className={({ isActive }) => 
+                            `flex items-center gap-2 px-3 py-1.5 text-[12px] font-medium rounded-md transition-colors ${
+                              location.pathname === '/source' && activeRepoId === String(repo.id)
+                                ? 'bg-brand-50 text-brand-700' 
+                                : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                            }`
+                          }
+                        >
+                          <Icon icon="lucide:code-2" className="text-[14px]" />
+                          Source Code
+                        </NavLink>
+                        
+                        <NavLink
+                          to={`/build-index?repoId=${repo.id}`}
+                          className={({ isActive }) => 
+                            `flex items-center gap-2 px-3 py-1.5 text-[12px] font-medium rounded-md transition-colors ${
+                              location.pathname === '/build-index' && activeRepoId === String(repo.id)
+                                ? 'bg-brand-50 text-brand-700' 
+                                : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                            }`
+                          }
+                        >
+                          <Icon icon="lucide:database" className="text-[14px]" />
+                          Re-index
+                        </NavLink>
+                      </div>
+                    )}
                   </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </div>
 
-                  {(repo.index_error || repo.clone_error || repo.graph_error) && (
-                    <div style={{
-                      margin: "0 12px 8px", padding: "5px 8px", borderRadius: 4,
-                      background: "#160b0b", border: "1px solid #6b2737",
-                      fontSize: "0.72rem", color: "#f87171",
-                    }}>{repo.clone_error || repo.graph_error || repo.index_error}</div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </nav>
+      {/* Bottom Promo Box */}
+      <div className="p-4 mt-auto border-t border-slate-100 bg-slate-50/50">
+        <div className="bg-white border border-slate-200 rounded-lg p-3.5 shadow-sm">
+          <div className="flex items-center gap-1.5 text-amber-500 mb-1.5">
+            <Icon icon="lucide:zap" className="text-[14px] fill-current" />
+            <span className="text-[12px] font-semibold text-slate-800">Auto-review with webhooks</span>
+          </div>
+          <p className="text-[11px] text-slate-500 leading-relaxed mb-2">
+            Connect Bitbucket webhooks to auto-review every new PR.
+          </p>
+          <Link
+            to="/webhooks"
+            className="text-[11px] font-medium text-brand-600 hover:text-brand-700 flex items-center gap-1 w-max"
+          >
+            Set up webhook
+            <Icon icon="lucide:arrow-right" className="text-[10px]" />
+          </Link>
+        </div>
+      </div>
     </aside>
   );
 }

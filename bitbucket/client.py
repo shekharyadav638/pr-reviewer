@@ -4,21 +4,42 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
+_RETRY = Retry(
+    total=3,
+    backoff_factor=1,          # 1s, 2s, 4s between retries
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST"],
+    raise_on_status=False,
+)
+
+
+def _new_session(username: str, password: str) -> requests.Session:
+    s = requests.Session()
+    s.auth = (username, password)
+    adapter = HTTPAdapter(max_retries=_RETRY)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
 
 class BitbucketClient:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.session = requests.Session()
-        self.session.auth = (
-            settings.bitbucket_username,
-            settings.bitbucket_app_password,
-        )
         self.base_url = settings.bitbucket_base_url.rstrip("/")
+        self._username = settings.bitbucket_username
+        self._password = settings.bitbucket_app_password
+
+    @property
+    def session(self) -> requests.Session:
+        """Fresh session per property access avoids stale keep-alive connections."""
+        return _new_session(self._username, self._password)
 
     def _get(self, url: str, params: dict | None = None) -> dict:
         resp = self.session.get(url, params=params, timeout=30)
@@ -26,16 +47,18 @@ class BitbucketClient:
         return resp.json()
 
     def _get_paginated(self, url: str, params: dict | None = None,
-                       max_items: int = 100) -> list[dict]:
+                       max_items: int | None = None) -> list[dict]:
         results = []
         params = params or {}
-        while url and len(results) < max_items:
+        while url:
+            if max_items is not None and len(results) >= max_items:
+                break
             data = self._get(url, params)
             values = data.get("values", [])
             results.extend(values)
             url = data.get("next")
             params = {}  # next URL already contains params
-        return results[:max_items]
+        return results if max_items is None else results[:max_items]
 
     def get_pull_requests(self, workspace: str, repo_slug: str,
                           state: str = "MERGED",
@@ -170,6 +193,84 @@ class BitbucketClient:
             "tasks_count": tasks_count,
             "changed_files": "|".join(changed_files),
         }
+
+    def get_branches(self, workspace: str, repo_slug: str,
+                     max_branches: int = 200) -> list[str]:
+        """Return all branch names for a repository."""
+        url = (f"{self.base_url}/repositories/{workspace}/{repo_slug}"
+               f"/refs/branches")
+        items = self._get_paginated(url, params={"pagelen": 100},
+                                    max_items=max_branches)
+        return [b["name"] for b in items if b.get("name")]
+
+    def _get_workspace_slugs(self) -> list[str]:
+        """Derive workspace slugs. Explicit BITBUCKET_WORKSPACES takes priority."""
+        # 1. Explicit config wins — user knows exactly what they want
+        if self.settings.workspaces:
+            return list(self.settings.workspaces)
+
+        slugs: set[str] = set()
+
+        # 2. Extract from settings.repositories (e.g. "oslabsdevelopment/drupal-fit-portal")
+        for entry in self.settings.repositories:
+            parts = entry.strip("/").split("/")
+            if len(parts) >= 2:
+                slugs.add(parts[0])
+
+        # 3. /user username as last resort
+        try:
+            user = self._get(f"{self.base_url}/user")
+            username = user.get("username", "")
+            if username:
+                slugs.add(username)
+        except Exception:
+            pass
+
+        return list(slugs)
+
+    def list_repos_for_workspace(self, workspace: str) -> list[dict]:
+        """List all repositories in a workspace, fetching all pages."""
+        url = f"{self.base_url}/repositories/{workspace}"
+        return self._get_paginated(url, params={"pagelen": 100})
+
+    def list_all_repos(self) -> list[dict]:
+        """List repos across all workspaces derived from config and /user."""
+        workspace_slugs = self._get_workspace_slugs()
+        all_repos: list[dict] = []
+        seen_full_names: set[str] = set()
+        for slug in workspace_slugs:
+            try:
+                repos = self.list_repos_for_workspace(slug)
+            except Exception as exc:
+                logger.warning("Could not list repos for workspace %s: %s", slug, exc)
+                continue
+            for r in repos:
+                full_name = r.get("full_name", "")
+                if full_name in seen_full_names:
+                    continue
+                seen_full_names.add(full_name)
+                r["_workspace_slug"] = slug
+                all_repos.append(r)
+        return all_repos
+
+    def register_webhook(self, workspace: str, repo_slug: str,
+                         callback_url: str) -> dict:
+        """Register a webhook on a Bitbucket repo for PR created events."""
+        url = f"{self.base_url}/repositories/{workspace}/{repo_slug}/hooks"
+        payload = {
+            "description": "PR Guardian auto-review",
+            "url": callback_url,
+            "active": True,
+            "events": ["pullrequest:created"],
+        }
+        resp = self.session.post(url, json=payload, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_webhooks(self, workspace: str, repo_slug: str) -> list[dict]:
+        """List existing webhooks on a repo."""
+        url = f"{self.base_url}/repositories/{workspace}/{repo_slug}/hooks"
+        return self._get_paginated(url, max_items=50)
 
     @staticmethod
     def parse_pr_url(pr_url: str) -> tuple[str, str, int]:

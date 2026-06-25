@@ -121,11 +121,20 @@ class HybridReportBuilder:
         logger.info("Running ML + rule-based analysis...")
         ml_report: AnalysisReport = self.analyzer.analyze_pr(pr_url)
 
-        # Get PR detail for source branch commit
+        # Get PR detail for source branch commit + target branch
         pr_detail = self.client.get_pr_detail(workspace, repo_slug, pr_id)
         source_commit = (
             pr_detail.get("source", {}).get("commit", {}).get("hash", "")
         )
+        # The target branch is the ground truth for duplicate + logic analysis.
+        # A PR from feature-x→develop must be checked against develop's code;
+        # a PR from feature-x→stage must be checked against stage's code.
+        target_branch: str = (
+            pr_detail.get("destination", {}).get("branch", {}).get("name", "")
+        )
+        if target_branch:
+            logger.info("PR #%d targets branch '%s' — using branch-scoped index",
+                        pr_id, target_branch)
 
         changed_files = (
             ml_report.raw_metrics.get("changed_files_list")
@@ -164,7 +173,8 @@ class HybridReportBuilder:
         graph_ctx = GraphReviewContext()
         try:
             graph_ctx = self.graph_reviewer.analyze(
-                workspace, repo_slug, changed_files, file_contents
+                workspace, repo_slug, changed_files, file_contents,
+                target_branch=target_branch,
             )
         except Exception:
             logger.exception("Graph analysis failed")
@@ -199,7 +209,8 @@ class HybridReportBuilder:
         duplicate_warnings = []
         try:
             duplicate_warnings = self.duplicate_detector.detect(
-                workspace, repo_slug, file_contents
+                workspace, repo_slug, file_contents,
+                target_branch=target_branch,
             )
         except Exception:
             logger.exception("Duplicate detection failed")

@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from pydantic import BaseModel
@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from api.schemas import (
     AddRepoRequest,
     AnalyzeRequest,
+    PostReviewCommentsRequest,
     AnalyzeResponse,
     ErrorResponse,
     FeedbackRequest,
@@ -220,10 +221,10 @@ def fetch_repo_prs(repo_id: int):
     "/repos/{repo_id}/sync",
     responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
 )
-def sync_repo(repo_id: int, branch: str = ""):
-    """Pull latest code for a repo and rebuild graph incrementally."""
+def sync_repo(repo_id: int):
+    """Pull latest code for all indexed branches and rebuild graphs."""
     try:
-        return service.sync_repo(repo_id, branch=branch)
+        return service.sync_repo(repo_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -242,15 +243,29 @@ def list_branches(repo_id: int):
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@app.post(
+    "/repos/{repo_id}/checkout",
+    responses={404: {"model": ErrorResponse}},
+)
+def checkout_branch(repo_id: int, branch: str):
+    """Fetch and checkout a branch in the local clone."""
+    try:
+        return service.checkout_branch(repo_id, branch)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get(
     "/repos/{repo_id}/source",
     response_model=list[SourceEntry],
     responses={404: {"model": ErrorResponse}},
 )
-def browse_source(repo_id: int, path: str = ""):
-    """Browse the source tree of a cloned repo at the given path."""
+def browse_source(repo_id: int, path: str = "", branch: str = ""):
+    """Browse the source tree of a cloned repo at the given path and branch."""
     try:
-        return service.browse_source(repo_id, path)
+        return service.browse_source(repo_id, path, branch)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -260,10 +275,10 @@ def browse_source(repo_id: int, path: str = ""):
     response_model=SourceFileResponse,
     responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
 )
-def read_source_file(repo_id: int, path: str):
+def read_source_file(repo_id: int, path: str, branch: str = ""):
     """Return the contents of a single source file from the clone."""
     try:
-        return service.read_source_file(repo_id, path)
+        return service.read_source_file(repo_id, path, branch)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -289,6 +304,21 @@ def get_pr_diff(repo_id: int, pr_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post(
+    "/repos/{repo_id}/prs/{pr_id}/post-review-comments",
+    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+def post_review_comments(repo_id: int, pr_id: int, request: PostReviewCommentsRequest):
+    """Post all AI-detected issues as inline Bitbucket PR comments."""
+    try:
+        return service.post_review_comments(repo_id, pr_id, request.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logging.exception("Failed to post review comments on PR %d", pr_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class InlineCommentRequest(BaseModel):
     text: str
     filepath: str
@@ -309,4 +339,67 @@ def post_pr_comment(repo_id: int, pr_id: int, request: InlineCommentRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logging.exception("Failed to post comment on PR %d", pr_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------------ #
+# Bitbucket repo discovery                                             #
+# ------------------------------------------------------------------ #
+
+@app.post(
+    "/repos/{repo_id}/webhook",
+    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+def register_webhook(repo_id: int):
+    """Register a PR-created webhook on the Bitbucket repo."""
+    import os
+    host = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/") or "http://localhost:8000"
+    callback_url = f"{host}/webhook/bitbucket"
+    try:
+        return service.register_webhook(repo_id, callback_url)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logging.warning("Webhook registration failed for repo %d: %s", repo_id, e)
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/bitbucket/repos")
+def list_bitbucket_repos():
+    """Return cached Bitbucket repo listing (instant after first refresh)."""
+    try:
+        return service.list_bitbucket_repos()
+    except Exception as e:
+        logging.exception("Failed to list Bitbucket repos")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/bitbucket/repos/refresh")
+def refresh_bitbucket_repos():
+    """Fetch fresh repo list from Bitbucket API and update the local cache."""
+    try:
+        return service.refresh_bitbucket_repos()
+    except Exception as e:
+        logging.exception("Failed to refresh Bitbucket repos")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------------ #
+# Bitbucket webhook — auto-review on PR creation                       #
+# ------------------------------------------------------------------ #
+
+@app.post("/webhook/bitbucket")
+async def bitbucket_webhook(request: Request):
+    """
+    Receives Bitbucket webhook events.
+    On pullrequest:created, triggers hybrid analysis and posts review comments.
+    """
+    event = request.headers.get("X-Event-Key", "")
+    if event != "pullrequest:created":
+        return {"status": "ignored", "event": event}
+    try:
+        payload = await request.json()
+        return service.handle_pr_created_webhook(payload)
+    except Exception as e:
+        logging.exception("Webhook handling failed")
         raise HTTPException(status_code=500, detail=str(e))

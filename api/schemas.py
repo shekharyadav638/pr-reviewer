@@ -150,6 +150,10 @@ class HybridAnalyzeResponse(BaseModel):
 
 # --- Repo management schemas ---
 
+class IndexRepoRequest(BaseModel):
+    branch: str = ""
+
+
 class AddRepoRequest(BaseModel):
     repo_url: str   # e.g. https://bitbucket.org/workspace/repo  OR  workspace/repo
 
@@ -196,6 +200,12 @@ class RepoResponse(BaseModel):
     pr_count: int = 0
     pr_fetch_error: str = ""
 
+    # Multi-branch
+    branches: list[str] = []          # all known branches from Bitbucket
+    indexed_branches: list[str] = []  # branches with a completed index
+    current_branch: str = ""          # branch being processed right now
+    total_branches: int = 0           # total branches in the current run
+
 
 class PRListItem(BaseModel):
     pr_id: int
@@ -205,6 +215,8 @@ class PRListItem(BaseModel):
     created_at: str
     updated_at: str
     pr_url: str
+    source_branch: str = ""
+    target_branch: str = ""
 
 
 class SourceEntry(BaseModel):
@@ -217,6 +229,15 @@ class SourceEntry(BaseModel):
 class SourceFileResponse(BaseModel):
     path: str
     content: str
+
+
+class PostReviewCommentsRequest(BaseModel):
+    llm_detected_issues: list[dict] = []
+    llm_security_concerns: list[dict] = []
+    llm_performance_concerns: list[dict] = []
+    llm_code_smells: list[dict] = []
+    llm_improvements: list[dict] = []
+    static_analysis_issues: list[dict] = []
 
 
 class GraphContextItem(BaseModel):

@@ -1,209 +1,245 @@
-import { useEffect, useState } from "react";
-import { getRepoPRs } from "../api/client";
-import Spinner from "../components/Spinner";
+import { Icon } from '@iconify/react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { getRepo, getRepoPRs } from '../api/client';
 
-const STATE_CFG = {
-  OPEN:      { bg: "#1a4731", text: "#4ade80", border: "#166534" },
-  MERGED:    { bg: "#2e1065", text: "#c4b5fd", border: "#4c1d95" },
-  DECLINED:  { bg: "#450a0a", text: "#f87171", border: "#6b2737" },
-  SUPERSEDED:{ bg: "#1c1917", text: "#a8a29e", border: "#44403c" },
-};
-
-function StateBadge({ state }) {
-  const s = (state || "").toUpperCase();
-  const c = STATE_CFG[s] || STATE_CFG.SUPERSEDED;
-  return (
-    <span style={{
-      display: "inline-block", padding: "2px 9px", borderRadius: 4,
-      fontSize: "0.7rem", fontWeight: 700, letterSpacing: "0.04em",
-      background: c.bg, color: c.text, border: `1px solid ${c.border}`,
-    }}>{s}</span>
-  );
+// Helper to format "X hours ago"
+function timeAgo(dateString) {
+  if (!dateString) return '';
+  const date = new Date(dateString);
+  const now = new Date();
+  const seconds = Math.floor((now - date) / 1000);
+  
+  let interval = Math.floor(seconds / 31536000);
+  if (interval > 1) return interval + " years ago";
+  interval = Math.floor(seconds / 2592000);
+  if (interval > 1) return interval + " months ago";
+  interval = Math.floor(seconds / 86400);
+  if (interval > 1) return interval + " days ago";
+  if (interval === 1) return "yesterday";
+  interval = Math.floor(seconds / 3600);
+  if (interval > 1) return interval + " hours ago";
+  interval = Math.floor(seconds / 60);
+  if (interval > 1) return interval + " minutes ago";
+  return Math.floor(seconds) + " seconds ago";
 }
 
-function Avatar({ name }) {
-  const initials = (name || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
-  const colors = ["#1f6feb","#7c3aed","#0891b2","#059669","#d97706"];
-  const color = colors[initials.charCodeAt(0) % colors.length];
-  return (
-    <div style={{
-      width: 28, height: 28, borderRadius: "50%",
-      backgroundColor: color, color: "#fff",
-      display: "flex", alignItems: "center", justifyContent: "center",
-      fontSize: "0.7rem", fontWeight: 700, flexShrink: 0,
-    }}>{initials}</div>
-  );
+// Generate a somewhat consistent color based on a string
+function stringToColor(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const colors = [
+    'bg-red-500', 'bg-orange-500', 'bg-amber-500', 
+    'bg-emerald-500', 'bg-teal-500', 'bg-cyan-500', 
+    'bg-blue-500', 'bg-indigo-500', 'bg-violet-500', 
+    'bg-purple-500', 'bg-fuchsia-500', 'bg-pink-500'
+  ];
+  return colors[Math.abs(hash) % colors.length];
 }
 
-const STATES = ["OPEN", "MERGED", "DECLINED"];
+export default function PRList() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const searchParams = new URLSearchParams(location.search);
+  const repoId = searchParams.get('repoId');
 
-export default function PRList({ repo, onOpenPR }) {
-  const [prs, setPRs]         = useState([]);
+  const [repo, setRepo] = useState(null);
+  const [prs, setPrs] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState(null);
-  const [stateFilter, setFilter] = useState("OPEN");
-  const [search, setSearch]   = useState("");
+  const [tab, setTab] = useState('OPEN');
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
-    if (!repo) return;
-    setLoading(true); setError(null);
-    getRepoPRs(repo.id, stateFilter)
-      .then(setPRs)
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [repo?.id, stateFilter]);
+    if (!repoId) {
+      setLoading(false);
+      return;
+    }
 
-  const filtered = prs.filter(pr =>
-    !search ||
-    pr.title.toLowerCase().includes(search.toLowerCase()) ||
-    pr.author.toLowerCase().includes(search.toLowerCase()) ||
-    String(pr.pr_id).includes(search)
+    async function loadData() {
+      setLoading(true);
+      try {
+        const [repoData, prsData] = await Promise.all([
+          getRepo(repoId),
+          getRepoPRs(repoId, tab)
+        ]);
+        setRepo(repoData);
+        setPrs(prsData);
+      } catch (err) {
+        console.error("Failed to load repo data", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadData();
+  }, [repoId, tab]);
+
+  const filteredPrs = prs.filter(pr => 
+    pr.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+    pr.author.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   return (
-    <div style={{ padding: "28px 32px", maxWidth: 960 }}>
+    <div className="flex flex-col h-full bg-white">
       {/* Header */}
-      <div style={{ marginBottom: 24 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-          <h2 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 700, color: "#e2e8f0" }}>
-            Pull requests
-          </h2>
-          {repo.index_status === "indexed" && (
-            <span style={{
-              fontSize: "0.72rem", padding: "2px 8px", borderRadius: 4,
-              background: "#14532d", color: "#4ade80", border: "1px solid #166534",
-            }}>● Semantic index ready</span>
-          )}
-        </div>
-        <p style={{ margin: 0, fontSize: "0.85rem", color: "#6b7280" }}>
-          {repo.workspace} / <strong style={{ color: "#8c9bab" }}>{repo.repo_slug}</strong>
-        </p>
-      </div>
-
-      {/* Toolbar */}
-      <div style={{
-        display: "flex", gap: 10, marginBottom: 16,
-        alignItems: "center", flexWrap: "wrap",
-      }}>
-        {/* State tabs */}
-        <div style={{
-          display: "flex", border: "1px solid #30363d", borderRadius: 6, overflow: "hidden",
-        }}>
-          {STATES.map(s => (
-            <button key={s} onClick={() => setFilter(s)} style={{
-              padding: "6px 14px", fontSize: "0.8rem", fontWeight: 600,
-              border: "none", cursor: "pointer",
-              borderRight: s !== "DECLINED" ? "1px solid #30363d" : "none",
-              backgroundColor: stateFilter === s ? "#21262d" : "#0d1117",
-              color: stateFilter === s ? "#e2e8f0" : "#6b7280",
-              transition: "all 0.12s",
-            }}>{s}</button>
-          ))}
-        </div>
-
-        {/* Search */}
-        <div style={{ position: "relative", flex: 1, minWidth: 180 }}>
-          <span style={{
-            position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)",
-            color: "#6b7280", fontSize: "0.85rem", pointerEvents: "none",
-          }}>🔍</span>
-          <input
-            value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Search pull requests"
-            style={{
-              width: "100%", boxSizing: "border-box",
-              paddingLeft: 32, paddingRight: 12, paddingTop: 7, paddingBottom: 7,
-              fontSize: "0.83rem", background: "#0d1117", color: "#e2e8f0",
-              border: "1px solid #30363d", borderRadius: 6, outline: "none",
-            }}
-          />
-        </div>
-
-        <span style={{ fontSize: "0.8rem", color: "#6b7280", marginLeft: "auto" }}>
-          {filtered.length} result{filtered.length !== 1 ? "s" : ""}
-        </span>
-      </div>
-
-      {/* Table */}
-      {loading && <Spinner />}
-
-      {error && (
-        <div style={{
-          padding: "12px 16px", borderRadius: 8, marginBottom: 16,
-          background: "#450a0a", border: "1px solid #6b2737", color: "#f87171",
-          fontSize: "0.85rem",
-        }}>{error}</div>
-      )}
-
-      {!loading && !error && (
-        <div style={{
-          border: "1px solid #21262d", borderRadius: 8, overflow: "hidden",
-          background: "#0d1117",
-        }}>
-          {filtered.length === 0 ? (
-            <div style={{ padding: "40px 24px", textAlign: "center", color: "#4b5563" }}>
-              No {stateFilter.toLowerCase()} pull requests{search ? " matching your search" : ""}.
+      <header className="px-6 py-5 border-b border-slate-200 shrink-0">
+        <div className="w-full">
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-3">
+              <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
+                Pull Requests
+              </h1>
+              {/* Semantic Index Status Badge */}
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-700 text-xs font-semibold tracking-wide">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_4px_rgba(16,185,129,0.4)] relative">
+                  <div className="absolute inset-0 rounded-full bg-emerald-500 animate-ping opacity-75"></div>
+                </div>
+                Semantic index ready
+              </span>
             </div>
-          ) : (
-            filtered.map((pr, i) => (
-              <div
-                key={pr.pr_id}
-                style={{
-                  display: "flex", alignItems: "center", gap: 14,
-                  padding: "14px 18px",
-                  borderBottom: i < filtered.length - 1 ? "1px solid #21262d" : "none",
-                  transition: "background 0.12s", cursor: "pointer",
-                }}
-                onClick={() => onOpenPR(pr)}
-                onMouseEnter={e => e.currentTarget.style.backgroundColor = "#161b22"}
-                onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
-              >
-                <Avatar name={pr.author} />
+            
+            {/* Repo Breadcrumb */}
+            <div className="flex items-center text-[13px] mt-1">
+              <Icon icon="mdi:github" className="text-slate-400 mr-1.5 text-[16px]" />
+              <span className="text-slate-500 font-medium">{repo ? repo.workspace : 'Workspace'}</span> 
+              <span className="text-slate-300 mx-1.5">/</span> 
+              <span className="text-slate-900 font-semibold">{repo ? repo.repo_slug : 'Repository'}</span>
+            </div>
+          </div>
+        </div>
+      </header>
 
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3, flexWrap: "wrap" }}>
-                    <StateBadge state={pr.state} />
-                    <span style={{
-                      fontWeight: 600, fontSize: "0.9rem", color: "#e2e8f0",
-                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                    }}>
-                      {pr.title}
-                    </span>
+      {/* Filters & Search Bar */}
+      <div className="px-6 py-2 border-b border-slate-200 shrink-0">
+        <div className="w-full flex items-center justify-between">
+          
+          <div className="flex items-center gap-4">
+            {/* Segmented Control Tabs */}
+            <div className="flex p-1 bg-slate-100 rounded-lg">
+              {['OPEN', 'MERGED', 'DECLINED'].map((t) => (
+                <button 
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={`px-4 py-1.5 text-[13px] rounded-md transition-colors focus:outline-none ${
+                    tab === t 
+                      ? 'font-semibold bg-white text-slate-900 shadow-sm' 
+                      : 'font-medium text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+            
+            {/* Search Input */}
+            <div className="relative w-80">
+              <Icon icon="lucide:search" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-[15px]" />
+              <input 
+                type="text" 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search pull requests..." 
+                className="w-full pl-9 pr-4 py-1.5 bg-white border border-slate-200 rounded-lg text-[13px] text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition-all"
+              />
+            </div>
+          </div>
+
+          {/* Results Count */}
+          <div className="text-[13px] text-slate-500 font-medium">
+            {filteredPrs.length} results
+          </div>
+
+        </div>
+      </div>
+
+      {/* Table Header */}
+      <div className="grid grid-cols-12 gap-4 px-6 py-2.5 border-b border-slate-200 text-[12px] font-semibold text-slate-500 bg-white shrink-0">
+        <div className="col-span-10">Summary</div>
+        <div className="col-span-2">Created</div>
+      </div>
+
+      {/* PR List Content Area (Table Body) */}
+      <div className="flex-1 overflow-y-auto relative">
+        {loading ? (
+          <div className="py-12 text-center text-slate-500 text-sm">Loading pull requests...</div>
+        ) : !repoId ? (
+          <div className="py-12 text-center text-slate-500 text-sm">Please select a repository from the sidebar.</div>
+        ) : filteredPrs.length === 0 ? (
+          <div className="py-12 text-center text-slate-500 text-sm">No pull requests found.</div>
+        ) : (
+          <div className="w-full flex flex-col">
+            {filteredPrs.map((pr) => {
+              const initials = pr.author.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase();
+              const bgColor = stringToColor(pr.author);
+              
+              return (
+                <div 
+                  key={pr.pr_id} 
+                  onClick={() => navigate(`/pr-details?repoId=${repoId}&prId=${pr.pr_id}`)}
+                  className="grid grid-cols-12 gap-4 px-6 py-4 border-b border-slate-100 hover:bg-slate-50 transition-colors group cursor-pointer items-start"
+                >
+                  <div className="col-span-10 flex gap-3 min-w-0">
+                    {/* Avatar */}
+                    <div className={`w-8 h-8 rounded-full ${bgColor} text-white flex items-center justify-center font-bold text-xs uppercase shrink-0`}>
+                      {initials}
+                    </div>
+                    
+                    {/* PR Details */}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${
+                          pr.state === 'OPEN' 
+                            ? 'bg-[#0052CC] text-white'
+                            : pr.state === 'MERGED'
+                              ? 'bg-[#00875A] text-white'
+                              : 'bg-slate-500 text-white'
+                        }`}>
+                          {pr.state}
+                        </span>
+                        <h3 className="text-[14px] font-medium text-slate-900 group-hover:underline truncate" title={pr.title}>
+                          {pr.title}
+                        </h3>
+                      </div>
+                      
+                      {/* Meta Info */}
+                      <div className="text-[12px] text-slate-500 flex items-center gap-1 flex-wrap">
+                        <span>{pr.author}</span>
+                        <span>-</span>
+                        <span>#{pr.pr_id}, updated {timeAgo(pr.updated_at)}</span>
+                        
+                        {/* Branches */}
+                        <div className="flex items-center gap-1 ml-1 overflow-hidden">
+                          <span className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-slate-600 font-mono text-[10px] truncate max-w-[120px]" title={pr.source_branch || 'feature/branch'}>
+                            {pr.source_branch || 'feature/branch'}
+                          </span>
+                          <Icon icon="lucide:arrow-right" className="text-[10px] text-slate-400 shrink-0" />
+                          <span className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-slate-600 font-mono text-[10px] truncate max-w-[120px]" title={pr.target_branch || repo?.default_branch || 'main'}>
+                            {pr.target_branch || repo?.default_branch || 'main'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  <div style={{ fontSize: "0.77rem", color: "#6b7280" }}>
-                    #{pr.pr_id} · {pr.author}
-                    {pr.created_at && (
-                      <> · {new Date(pr.created_at).toLocaleDateString("en-US", {
-                        month: "short", day: "numeric", year: "numeric",
-                      })}</>
+                  
+                  {/* Created & Actions */}
+                  <div className="col-span-2 text-[13px] text-slate-700 flex items-start justify-between pt-0.5">
+                    <span>{timeAgo(pr.created_at)}</span>
+                    {pr.state === 'OPEN' && (
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); navigate(`/pr-details?repoId=${repoId}&prId=${pr.pr_id}`); }}
+                        className="px-3 py-1 bg-white border border-slate-300 text-slate-600 rounded text-[12px] font-medium hover:bg-slate-50 transition-colors opacity-0 group-hover:opacity-100"
+                      >
+                        Review
+                      </button>
                     )}
                   </div>
                 </div>
-
-                {/* Review button — only OPEN PRs */}
-                {pr.state === "OPEN" && (
-                  <button
-                    onClick={e => { e.stopPropagation(); onOpenPR(pr); }}
-                    style={{
-                      padding: "6px 14px", fontSize: "0.8rem", fontWeight: 600,
-                      backgroundColor: "#1f6feb", color: "#fff",
-                      border: "none", borderRadius: 6, cursor: "pointer",
-                      whiteSpace: "nowrap", flexShrink: 0,
-                    }}
-                  >Review PR →</button>
-                )}
-
-                {/* For merged/declined: view link */}
-                {pr.state !== "OPEN" && (
-                  <span style={{ color: "#4b5563", fontSize: "0.8rem", flexShrink: 0 }}>
-                    View →
-                  </span>
-                )}
-              </div>
-            ))
-          )}
-        </div>
-      )}
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

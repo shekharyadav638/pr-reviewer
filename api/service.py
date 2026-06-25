@@ -1,3 +1,4 @@
+import json
 import logging
 
 from analysis.analyzer import AnalysisReport, PRAnalyzer
@@ -18,6 +19,14 @@ from config.settings import Settings
 from hybrid.report_builder import HybridReport, HybridReportBuilder
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json_list(value: str) -> list:
+    try:
+        result = json.loads(value or "[]")
+        return result if isinstance(result, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 class AnalysisService:
@@ -49,9 +58,44 @@ class AnalysisService:
         return self._to_response(report)
 
     def analyze_hybrid(self, pr_url: str) -> HybridAnalyzeResponse:
+        # Auto-sync the local clone so duplicate detection + graph use fresh code
+        try:
+            workspace, repo_slug, _ = __import__(
+                "bitbucket.client", fromlist=["BitbucketClient"]
+            ).BitbucketClient.parse_pr_url(pr_url)
+            self._auto_sync_clone(workspace, repo_slug)
+        except Exception:
+            pass  # sync is best-effort — analysis continues regardless
         builder = self._get_hybrid_builder()
         report: HybridReport = builder.build_report(pr_url)
         return self._to_hybrid_response(report)
+
+    def _auto_sync_clone(self, workspace: str, repo_slug: str) -> None:
+        """Quick git fetch on the cloned repo before analysis."""
+        from repos.cloner import clone_dir
+        if not clone_dir(workspace, repo_slug).exists():
+            return
+        store = self._repo_store()
+        records = store.list_repos()
+        record = next(
+            (r for r in records
+             if r.workspace == workspace and r.repo_slug == repo_slug),
+            None,
+        )
+        if not record:
+            return
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            cloner = self._make_cloner()
+            cloner.sync(
+                workspace, repo_slug,
+                branch=record.default_branch or "",
+                git_url=record.git_url or "",
+            )
+            logger.info("Auto-synced clone for %s/%s", workspace, repo_slug)
+        except Exception as exc:
+            logger.warning("Auto-sync failed for %s/%s: %s", workspace, repo_slug, exc)
 
     def trigger_retraining(self) -> dict:
         import numpy as np
@@ -152,10 +196,13 @@ class AnalysisService:
 
     def start_index_repo(self, repo_id: int) -> dict:
         """
-        Full pipeline (background):
-          1. Sparse-shallow clone the repo
-          2. Build AST graph (code-review-graph MCP)
-          3. Build ChromaDB vector embeddings (duplicate detection)
+        Full pipeline (background) for ALL branches:
+          For each branch fetched from Bitbucket:
+            1. Sparse-shallow clone
+            2. Build AST graph
+            3. Build ChromaDB vector index
+        Progress is reported as a fraction of total branches completed.
+        The `branch` parameter is now ignored — all branches are always indexed.
         """
         import threading
         store = self._repo_store()
@@ -172,190 +219,403 @@ class AnalysisService:
 
         def _run():
             from datetime import datetime
+            from embeddings.graph_indexer import GraphIndexer
+            from embeddings.indexer import RepoIndexer
+            from repos.cloner import clone_dir
+
             settings = Settings.load()
-            cloner = self._make_cloner()
+            cloner   = self._make_cloner()
 
-            # ── Step 1: Clone ──────────────────────────────────────────
+            # ── Fetch branch list from Bitbucket ───────────────────────
             try:
-                def _clone_prog(pct: int, _msg: str):
-                    store.update_clone_status(repo_id, "cloning", progress=pct)
-
-                cloner.clone(
-                    record.git_url,
-                    record.workspace, record.repo_slug,
-                    branch=record.default_branch,
-                    progress_callback=_clone_prog,
-                )
-                size_mb = cloner.disk_usage_mb(record.workspace, record.repo_slug)
-                store.update_clone_status(
-                    repo_id, "cloned", progress=100,
-                    size_mb=size_mb,
-                    cloned_at=datetime.utcnow().isoformat(),
-                )
-                logger.info("Clone done (%.1f MB) for repo %d", size_mb, repo_id)
+                bb = self._make_bb_client()
+                branches = bb.get_branches(record.workspace, record.repo_slug)
             except Exception as exc:
-                logger.exception("Clone failed for repo %d", repo_id)
-                store.update_clone_status(repo_id, "error", error=str(exc))
-                return
+                logger.warning("Could not fetch branches from Bitbucket (%s) — "
+                               "falling back to default branch", exc)
+                branches = [record.default_branch or "main"]
 
-            # ── Step 2: AST graph ──────────────────────────────────────
-            store.update_graph_status(repo_id, "building", progress=0)
-            try:
-                from embeddings.graph_indexer import GraphIndexer
-                gi = GraphIndexer()
+            if not branches:
+                branches = [record.default_branch or "main"]
 
-                def _graph_prog(pct: int, _msg: str):
-                    store.update_graph_status(repo_id, "building", progress=pct)
+            store.update_branches(repo_id, branches)
+            total = len(branches)
+            logger.info("Indexing %d branches for repo %d: %s",
+                        total, repo_id, branches)
 
-                from repos.cloner import clone_dir
-                nodes = gi.build_graph(
-                    clone_dir(record.workspace, record.repo_slug),
-                    full_rebuild=True,
-                    progress_callback=_graph_prog,
-                )
-                store.update_graph_status(
-                    repo_id, "built", progress=100,
-                    nodes=nodes,
-                    built_at=datetime.utcnow().isoformat(),
-                )
-                logger.info("Graph built (%d nodes) for repo %d", nodes, repo_id)
-            except Exception as exc:
-                logger.exception("Graph build failed for repo %d", repo_id)
-                store.update_graph_status(repo_id, "error", error=str(exc))
-                # continue — chroma index is still useful without graph
+            for idx, br in enumerate(branches):
+                store.set_current_branch(repo_id, br, total=total)
 
-            # ── Step 3: ChromaDB vector index ──────────────────────────
-            store.update_index_status(repo_id, "indexing", progress=0)
-            try:
-                from embeddings.indexer import RepoIndexer
-                indexer = RepoIndexer(settings)
+                # Overall clone/index progress = fraction of branches done
+                overall_pct = int(idx * 100 / total)
+                store.update_clone_status(repo_id, "cloning", progress=overall_pct)
+                store.update_index_status(repo_id, "indexing", progress=overall_pct)
 
-                def _chroma_prog(pct: int, _msg: str):
-                    store.update_index_status(repo_id, "indexing", progress=pct)
+                # ── Step 1: Clone ──────────────────────────────────────
+                try:
+                    cloner.clone(
+                        record.git_url,
+                        record.workspace, record.repo_slug,
+                        branch=br,
+                    )
+                    logger.info("[%s] Clone done", br)
+                except Exception as exc:
+                    logger.error("[%s] Clone failed: %s", br, exc)
+                    store.update_clone_status(repo_id, "error", error=f"{br}: {exc}")
+                    continue  # skip graph + index for this branch, try next
 
-                count = indexer.index_repo(
-                    record.workspace, record.repo_slug,
-                    progress_callback=_chroma_prog,
-                )
-                store.update_index_status(
-                    repo_id, "indexed", progress=100,
-                    indexed_at=datetime.utcnow().isoformat(),
-                )
-                logger.info("Chroma: %d chunks for repo %d", count, repo_id)
-            except Exception as exc:
-                logger.exception("Chroma indexing failed for repo %d", repo_id)
-                store.update_index_status(repo_id, "error", error=str(exc))
+                # ── Step 2: AST graph ──────────────────────────────────
+                store.update_graph_status(repo_id, "building", progress=0)
+                try:
+                    gi = GraphIndexer()
+                    nodes = gi.build_graph(
+                        clone_dir(record.workspace, record.repo_slug, br),
+                    )
+                    store.update_graph_status(
+                        repo_id, "built", progress=100,
+                        nodes=nodes,
+                        built_at=datetime.utcnow().isoformat(),
+                    )
+                    logger.info("[%s] Graph: %d nodes", br, nodes)
+                except Exception as exc:
+                    logger.warning("[%s] Graph build failed: %s", br, exc)
+                    store.update_graph_status(repo_id, "error", error=f"{br}: {exc}")
+                    # Continue — ChromaDB index is still useful without graph
+
+                # ── Step 3: ChromaDB vector index ──────────────────────
+                try:
+                    indexer = RepoIndexer(settings)
+                    count = indexer.index_repo(
+                        record.workspace, record.repo_slug,
+                        branch=br,
+                    )
+                    store.mark_branch_indexed(repo_id, br)
+                    logger.info("[%s] Chroma: %d chunks", br, count)
+                except Exception as exc:
+                    logger.error("[%s] Chroma indexing failed: %s", br, exc)
+                    store.update_index_status(repo_id, "error", error=f"{br}: {exc}")
+                    continue
+
+            # ── All branches done ──────────────────────────────────────
+            size_mb = sum(
+                cloner.disk_usage_mb(record.workspace, record.repo_slug, br)
+                for br in branches
+            )
+            store.update_clone_status(
+                repo_id, "cloned", progress=100,
+                size_mb=size_mb,
+                cloned_at=datetime.utcnow().isoformat(),
+            )
+            store.update_index_status(
+                repo_id, "indexed", progress=100,
+                indexed_at=datetime.utcnow().isoformat(),
+            )
+            store.set_current_branch(repo_id, "", total=total)
+            logger.info("All %d branches indexed for repo %d", total, repo_id)
 
         threading.Thread(target=_run, daemon=True).start()
         return {"status": "build_started", "repo_id": repo_id}
 
-    def sync_repo(self, repo_id: int, branch: str = "") -> dict:
-        """Pull latest code and rebuild graph/index (background)."""
+    def sync_repo(self, repo_id: int) -> dict:
+        """Pull latest + rebuild graph for every indexed branch (background)."""
         import threading
         store = self._repo_store()
         record = store.get_repo(repo_id)
         if not record:
             raise ValueError(f"Repo {repo_id} not found")
 
+        # Determine which branches to sync: prefer already-indexed ones,
+        # fall back to the known branches list, then the default branch.
+        indexed = _parse_json_list(getattr(record, "indexed_branches", "[]"))
+        known   = _parse_json_list(getattr(record, "branches", "[]"))
+        branches_to_sync = indexed or known or [record.default_branch or "main"]
+
         store.update_clone_status(repo_id, "cloning", progress=0)
 
         def _run():
             from datetime import datetime
+            from embeddings.graph_indexer import GraphIndexer
+            from repos.cloner import clone_dir
+
             cloner = self._make_cloner()
-            target_branch = branch or record.default_branch
+            total  = len(branches_to_sync)
 
-            try:
-                def _prog(pct: int, _msg: str):
-                    store.update_clone_status(repo_id, "cloning", progress=pct)
+            for idx, br in enumerate(branches_to_sync):
+                store.set_current_branch(repo_id, br, total=total)
+                overall_pct = int(idx * 100 / total)
+                store.update_clone_status(repo_id, "cloning", progress=overall_pct)
 
-                cloner.sync(
-                    record.workspace, record.repo_slug,
-                    branch=target_branch,
-                    git_url=record.git_url,
-                    progress_callback=_prog,
-                )
-                if branch and branch != record.default_branch:
-                    store.update_default_branch(repo_id, branch)
+                # ── git fetch + reset ──────────────────────────────────
+                try:
+                    cloner.sync(
+                        record.workspace, record.repo_slug,
+                        branch=br,
+                        git_url=record.git_url,
+                    )
+                    logger.info("[sync] %s done", br)
+                except Exception as exc:
+                    logger.error("[sync] %s failed: %s", br, exc)
+                    store.update_clone_status(repo_id, "error", error=f"{br}: {exc}")
+                    continue
 
-                size_mb = cloner.disk_usage_mb(record.workspace, record.repo_slug)
-                store.update_clone_status(
-                    repo_id, "cloned", progress=100, size_mb=size_mb,
-                    cloned_at=datetime.utcnow().isoformat(),
-                )
-            except Exception as exc:
-                logger.exception("Sync failed for repo %d", repo_id)
-                store.update_clone_status(repo_id, "error", error=str(exc))
-                return
+                # ── incremental graph rebuild ──────────────────────────
+                store.update_graph_status(repo_id, "building", progress=0)
+                try:
+                    gi = GraphIndexer()
+                    nodes = gi.build_graph(
+                        clone_dir(record.workspace, record.repo_slug, br),
+                    )
+                    store.update_graph_status(
+                        repo_id, "built", progress=100, nodes=nodes,
+                        built_at=datetime.utcnow().isoformat(),
+                    )
+                    logger.info("[sync] %s graph: %d nodes", br, nodes)
+                except Exception as exc:
+                    logger.warning("[sync] %s graph failed: %s", br, exc)
+                    store.update_graph_status(repo_id, "error", error=f"{br}: {exc}")
 
-            # Rebuild graph incrementally
-            store.update_graph_status(repo_id, "building", progress=0)
-            try:
-                from embeddings.graph_indexer import GraphIndexer
-                from repos.cloner import clone_dir
-                gi = GraphIndexer()
-                nodes = gi.build_graph(
-                    clone_dir(record.workspace, record.repo_slug),
-                    full_rebuild=False,
-                )
-                store.update_graph_status(
-                    repo_id, "built", progress=100, nodes=nodes,
-                    built_at=datetime.utcnow().isoformat(),
-                )
-            except Exception as exc:
-                logger.exception("Graph rebuild failed for repo %d", repo_id)
-                store.update_graph_status(repo_id, "error", error=str(exc))
+            size_mb = sum(
+                cloner.disk_usage_mb(record.workspace, record.repo_slug, br)
+                for br in branches_to_sync
+            )
+            store.update_clone_status(
+                repo_id, "cloned", progress=100, size_mb=size_mb,
+                cloned_at=datetime.utcnow().isoformat(),
+            )
+            store.set_current_branch(repo_id, "", total=total)
+            logger.info("Sync complete for %d branches (repo %d)", total, repo_id)
 
         threading.Thread(target=_run, daemon=True).start()
         return {"status": "sync_started", "repo_id": repo_id,
-                "branch": branch or record.default_branch}
+                "branches": branches_to_sync}
+
+    def checkout_branch(self, repo_id: int, branch: str) -> dict:
+        """No-op in branch-per-dir model — the frontend just switches which branch it reads."""
+        store = self._repo_store()
+        record = store.get_repo(repo_id)
+        if not record:
+            raise ValueError(f"Repo {repo_id} not found")
+        indexed = _parse_json_list(record.indexed_branches)
+        if branch not in indexed:
+            raise ValueError(f"Branch '{branch}' is not indexed yet")
+        return {"status": "ok", "branch": branch}
 
     def list_branches(self, repo_id: int) -> list[str]:
+        """Return indexed branches from DB — these have clone dirs on disk."""
         store = self._repo_store()
         record = store.get_repo(repo_id)
         if not record:
             raise ValueError(f"Repo {repo_id} not found")
-        cloner = self._make_cloner()
-        return cloner.list_branches(record.workspace, record.repo_slug)
+        indexed = _parse_json_list(record.indexed_branches)
+        if indexed:
+            return indexed
+        # Fallback: all known branches from Bitbucket API stored in DB
+        return _parse_json_list(record.branches)
 
-    def browse_source(self, repo_id: int, path: str = "") -> list[dict]:
+    def browse_source(self, repo_id: int, path: str = "", branch: str = "") -> list[dict]:
         store = self._repo_store()
         record = store.get_repo(repo_id)
         if not record:
             raise ValueError(f"Repo {repo_id} not found")
+        branch = self._resolve_branch(record, branch)
         cloner = self._make_cloner()
-        return cloner.browse(record.workspace, record.repo_slug, path)
+        return cloner.browse(record.workspace, record.repo_slug, path, branch)
 
-    def read_source_file(self, repo_id: int, path: str) -> dict:
+    def read_source_file(self, repo_id: int, path: str, branch: str = "") -> dict:
         store = self._repo_store()
         record = store.get_repo(repo_id)
         if not record:
             raise ValueError(f"Repo {repo_id} not found")
+        branch = self._resolve_branch(record, branch)
         cloner = self._make_cloner()
-        content = cloner.read_file(record.workspace, record.repo_slug, path)
+        content = cloner.read_file(record.workspace, record.repo_slug, path, branch)
         return {"path": path, "content": content}
+
+    def _resolve_branch(self, record, branch: str) -> str:
+        """Pick the branch to serve source from. Uses the first indexed branch as default."""
+        if branch:
+            return branch
+        indexed = _parse_json_list(record.indexed_branches)
+        if indexed:
+            return indexed[0]
+        return record.default_branch or ""
 
     def _make_cloner(self):
         from repos.cloner import RepoCloner
         settings = Settings.load()
+        username = settings.bitbucket_username
+        # Bitbucket git auth requires the account username, not an email.
+        # Resolve it from /user if the configured value looks like an email.
+        if "@" in username and settings.bitbucket_app_password:
+            try:
+                bb = self._make_bb_client()
+                user_info = bb._get(f"{settings.bitbucket_base_url}/user")
+                username = user_info.get("username") or username
+            except Exception:
+                pass
         return RepoCloner(
-            username=settings.bitbucket_username,
+            username=username,
             password=settings.bitbucket_app_password,
         )
 
+    def _make_bb_client(self):
+        from bitbucket.client import BitbucketClient as BBC
+        return BBC(Settings.load())
+
+    # ------------------------------------------------------------------ #
+    # Bitbucket webhook registration                                        #
+    # ------------------------------------------------------------------ #
+
+    def register_webhook(self, repo_id: int, callback_url: str) -> dict:
+        record = self._repo_store().get_repo(repo_id)
+        if not record:
+            raise ValueError(f"Repo {repo_id} not found")
+        client = self._make_bb_client()
+        try:
+            existing = client.list_webhooks(record.workspace, record.repo_slug)
+            for hook in existing:
+                if hook.get("url") == callback_url:
+                    return {"status": "already_registered", "url": callback_url}
+            result = client.register_webhook(record.workspace, record.repo_slug, callback_url)
+            return {"status": "registered", "url": callback_url, "uuid": result.get("uuid", "")}
+        except Exception as exc:
+            import requests as _req
+            if isinstance(exc, _req.exceptions.HTTPError) and exc.response is not None:
+                if exc.response.status_code == 403:
+                    return {
+                        "status": "permission_denied",
+                        "message": "App password lacks 'Webhooks' scope. "
+                                   "Go to Bitbucket → Personal settings → App passwords → "
+                                   "edit your password and enable Webhooks (read+write).",
+                    }
+            raise
+
+    # ------------------------------------------------------------------ #
+    # Bitbucket repo discovery                                             #
+    # ------------------------------------------------------------------ #
+
+    def list_bitbucket_repos(self) -> list[dict]:
+        """Return cached Bitbucket repo listing (instant). Empty if never refreshed."""
+        return self._repo_store().get_bb_repo_cache()
+
+    def refresh_bitbucket_repos(self) -> list[dict]:
+        """Fetch fresh repo listing from Bitbucket API, save to cache, return it."""
+        client = self._make_bb_client()
+        raw_repos = client.list_all_repos()
+        result = []
+        for r in raw_repos:
+            ws = r.get("_workspace_slug", "") or (
+                r.get("workspace", {}).get("slug", "") if isinstance(r.get("workspace"), dict) else ""
+            )
+            result.append({
+                "workspace":   ws,
+                "slug":        r.get("slug", ""),
+                "full_name":   r.get("full_name", ""),
+                "description": r.get("description", "") or "",
+                "is_private":  r.get("is_private", False),
+                "language":    r.get("language", "") or "",
+                "updated_on":  r.get("updated_on", ""),
+                "size":        r.get("size", 0),
+            })
+        self._repo_store().save_bb_repo_cache(result)
+        return result
+
+    # ------------------------------------------------------------------ #
+    # Webhook: auto-review on PR creation                                  #
+    # ------------------------------------------------------------------ #
+
+    def handle_pr_created_webhook(self, payload: dict) -> dict:
+        """
+        Triggered by Bitbucket's pullrequest:created webhook.
+        Finds the matching connected repo, runs hybrid analysis, posts issues.
+        """
+        import threading
+
+        pr_data    = payload.get("pullrequest", {})
+        repo_data  = payload.get("repository", {})
+        ws_data    = repo_data.get("workspace", {})
+
+        workspace  = ws_data.get("slug", "")
+        # Bitbucket webhooks put the slug in full_name ("workspace/repo") not slug
+        repo_slug  = repo_data.get("slug", "")
+        if not repo_slug:
+            full_name = repo_data.get("full_name", "")
+            if "/" in full_name:
+                workspace = workspace or full_name.split("/")[0]
+                repo_slug = full_name.split("/")[1]
+        pr_id      = pr_data.get("id")
+        pr_links   = pr_data.get("links", {})
+        pr_html    = pr_links.get("html", {}).get("href", "")
+
+        logger.info("Webhook payload: workspace=%r repo=%r pr_id=%r", workspace, repo_slug, pr_id)
+
+        if not (workspace and repo_slug and pr_id):
+            logger.warning("Webhook ignored: missing fields (workspace=%r repo=%r pr_id=%r)",
+                           workspace, repo_slug, pr_id)
+            return {"status": "ignored", "reason": "missing fields"}
+
+        # Only process if the repo is connected
+        store   = self._repo_store()
+        records = store.list_repos()
+        connected = [(r.workspace, r.repo_slug) for r in records]
+        logger.info("Webhook: connected repos = %s", connected)
+        record  = next(
+            (r for r in records
+             if r.workspace == workspace and r.repo_slug == repo_slug),
+            None,
+        )
+        if not record:
+            logger.warning("Webhook ignored: %s/%s not in connected repos %s",
+                           workspace, repo_slug, connected)
+            return {"status": "ignored", "reason": "repo not connected"}
+
+        pr_url = pr_html or (
+            f"https://bitbucket.org/{workspace}/{repo_slug}/pull-requests/{pr_id}"
+        )
+
+        def _run():
+            try:
+                logger.info("Webhook: auto-reviewing PR #%s for %s/%s", pr_id, workspace, repo_slug)
+                report = self._get_hybrid_builder().build_report(pr_url)
+                review_data = self._to_hybrid_response(report).model_dump()
+                self.post_review_comments(record.id, pr_id, review_data)
+                logger.info("Webhook: posted review comments on PR #%s", pr_id)
+            except Exception as exc:
+                logger.exception("Webhook auto-review failed for PR #%s: %s", pr_id, exc)
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"status": "review_started", "pr_id": pr_id, "workspace": workspace, "repo": repo_slug}
+
     @staticmethod
     def _to_git_url(repo_url: str) -> str:
-        """Convert any repo URL/slug to a cloneable https URL."""
+        """Normalise any URL/slug to a cloneable HTTPS git URL."""
         url = repo_url.strip().rstrip("/")
+
+        # Already HTTPS
         if url.startswith("http://") or url.startswith("https://"):
             if not url.endswith(".git"):
                 url += ".git"
             return url
+
+        # SSH → convert to HTTPS so http.extraheader auth works
+        # git@bitbucket.org:ws/repo.git  →  https://bitbucket.org/ws/repo.git
+        # git@github.com:ws/repo.git     →  https://github.com/ws/repo.git
         if url.startswith("git@"):
-            return url
+            # Remove git@ prefix, split host and path at ':'
+            rest = url[len("git@"):]
+            if ":" in rest:
+                host, path = rest.split(":", 1)
+            else:
+                raise ValueError(f"Cannot parse SSH URL: {repo_url}")
+            if not path.endswith(".git"):
+                path += ".git"
+            return f"https://{host}/{path}"
+
         # workspace/repo shorthand — assume Bitbucket
-        parts = url.split("/")
+        parts = [p for p in url.split("/") if p]
         if len(parts) == 2:
-            return f"https://bitbucket.org/{parts[0]}/{parts[1]}.git"
+            slug = parts[1] if parts[1].endswith(".git") else parts[1] + ".git"
+            return f"https://bitbucket.org/{parts[0]}/{slug}"
         return url
 
     def get_repo_prs(self, repo_id: int,
@@ -388,6 +648,8 @@ class AnalysisService:
                     f"https://bitbucket.org/{record.workspace}/"
                     f"{record.repo_slug}/pull-requests/{pr['id']}"
                 ),
+                source_branch=pr.get("source", {}).get("branch", {}).get("name", ""),
+                target_branch=pr.get("destination", {}).get("branch", {}).get("name", ""),
             ))
         return items
 
@@ -476,6 +738,118 @@ class AnalysisService:
         ]
         return {"diff": raw_diff, "files": files}
 
+    def post_review_comments(self, repo_id: int, pr_id: int,
+                             review_data: dict) -> dict:
+        """Post every AI-detected issue as an inline comment on the Bitbucket PR."""
+        from collections import defaultdict
+
+        # ── Parse diff to find first added line per file ─────────────────
+        diff_data = self.get_pr_diff(repo_id, pr_id)
+        file_first_lines = self._parse_first_lines(diff_data.get("diff", ""))
+
+        def resolve_line(filepath: str, explicit_line: int | None) -> int | None:
+            if explicit_line:
+                return explicit_line
+            # Exact match first
+            if filepath in file_first_lines:
+                return file_first_lines[filepath]
+            # Suffix match (e.g. issue has "file.js", diff has "src/utils/file.js")
+            for k, v in file_first_lines.items():
+                if k.endswith("/" + filepath) or k == filepath:
+                    return v
+            return None
+
+        # Build {file: [suggestions]} from llm_improvements
+        improvements: dict[str, list[str]] = {}
+        for imp in review_data.get("llm_improvements", []):
+            f = (imp.get("file") or "").strip()
+            desc = (imp.get("description") or "").strip()
+            if f and desc:
+                improvements.setdefault(f, []).append(desc)
+
+        # Group issues by (filepath, line) ─────────────────────────────────
+        groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
+
+        def collect(category: str, items: list[dict], has_line: bool = False):
+            for item in items:
+                fp = (item.get("file") or "").strip()
+                if not fp:
+                    continue
+                explicit = item.get("line") if has_line else None
+                ln = resolve_line(fp, explicit)
+                if not ln:
+                    continue
+                groups[(fp, ln)].append({
+                    "category": category,
+                    "severity": (item.get("severity") or "").upper(),
+                    "description": item.get("description") or item.get("message") or "",
+                    "rule": item.get("rule", ""),
+                })
+
+        collect("Code Issue",       review_data.get("llm_detected_issues", []))
+        collect("Security",         review_data.get("llm_security_concerns", []))
+        collect("Performance",      review_data.get("llm_performance_concerns", []))
+        collect("Code Smell",       review_data.get("llm_code_smells", []))
+        collect("Static Analysis",  review_data.get("static_analysis_issues", []), has_line=True)
+
+        _sev_icon = {
+            "CRITICAL": "🔴", "HIGH": "🔴", "ERROR": "🔴",
+            "MEDIUM": "🟡", "WARNING": "🟡",
+            "LOW": "🔵", "INFO": "🔵",
+        }
+
+        posted = skipped = 0
+        for (fp, ln), issues in groups.items():
+            lines = ["**PR Guardian — AI Review**", ""]
+            for iss in issues:
+                icon = _sev_icon.get(iss["severity"], "⚪")
+                rule = f" `{iss['rule']}`" if iss.get("rule") else ""
+                sev = f" **{iss['severity']}**" if iss["severity"] else ""
+                lines.append(f"{icon} **[{iss['category']}]**{sev}{rule}")
+                lines.append(f"{iss['description']}")
+                lines.append("")
+
+            # Append improvements for this file
+            file_imps = improvements.get(fp, [])
+            if file_imps:
+                lines.append("💡 **Suggested improvements:**")
+                for s in file_imps:
+                    lines.append(f"- {s}")
+
+            text = "\n".join(lines).rstrip()
+            try:
+                self.post_pr_comment(repo_id, pr_id, text, fp, ln)
+                posted += 1
+            except Exception as exc:
+                logger.warning("Failed to post inline comment at %s:%d — %s", fp, ln, exc)
+                skipped += 1
+
+        return {"posted": posted, "skipped": skipped, "total": posted + skipped}
+
+    @staticmethod
+    def _parse_first_lines(raw_diff: str) -> dict[str, int]:
+        """Return {filepath: first_new_line_number} for every changed file in the diff."""
+        import re
+        result: dict[str, int] = {}
+        current_file: str | None = None
+        new_line = 0
+
+        for raw in raw_diff.split("\n"):
+            if raw.startswith("+++ b/"):
+                current_file = raw[6:]
+                new_line = 0
+            elif raw.startswith("@@ ") and current_file:
+                m = re.search(r"\+(\d+)", raw)
+                new_line = int(m.group(1)) if m else 0
+            elif current_file and raw.startswith("+") and not raw.startswith("+++"):
+                if current_file not in result:
+                    result[current_file] = new_line
+                new_line += 1
+            elif current_file and not raw.startswith("-") and not raw.startswith("\\"):
+                new_line += 1
+
+        return result
+
     def post_pr_comment(self, repo_id: int, pr_id: int,
                         text: str, filepath: str, line: int) -> dict:
         store = self._repo_store()
@@ -547,19 +921,42 @@ class AnalysisService:
 
     @staticmethod
     def _parse_repo_url(repo_url: str) -> tuple[str, str]:
-        """Parse  https://bitbucket.org/ws/repo  or  ws/repo  → (ws, repo)."""
+        """Parse any git URL/slug → (workspace, repo_slug).
+
+        Handles:
+          https://bitbucket.org/ws/repo(.git)
+          git@bitbucket.org:ws/repo(.git)
+          git@github.com:ws/repo(.git)
+          ws/repo
+        """
         url = repo_url.strip().rstrip("/")
-        if "bitbucket.org" in url:
-            from urllib.parse import urlparse
-            parts = [p for p in urlparse(url).path.strip("/").split("/") if p]
+
+        # SSH URL: git@host:workspace/repo.git
+        if url.startswith("git@"):
+            colon_idx = url.index(":") if ":" in url else -1
+            if colon_idx == -1:
+                raise ValueError(f"Cannot parse SSH URL: {repo_url}")
+            path_part = url[colon_idx + 1:]  # oslabsdevelopment/fmea-node.git
+            parts = [p.removesuffix(".git") for p in path_part.split("/") if p]
             if len(parts) < 2:
-                raise ValueError(f"Cannot parse repo URL: {repo_url}")
+                raise ValueError(f"Cannot parse repo from SSH URL: {repo_url}")
             return parts[0], parts[1]
-        parts = url.split("/")
-        if len(parts) != 2 or not parts[0] or not parts[1]:
+
+        # HTTPS URL
+        if url.startswith("http://") or url.startswith("https://"):
+            from urllib.parse import urlparse
+            path_parts = [p.removesuffix(".git")
+                          for p in urlparse(url).path.strip("/").split("/") if p]
+            if len(path_parts) < 2:
+                raise ValueError(f"Cannot parse repo URL: {repo_url}")
+            return path_parts[0], path_parts[1]
+
+        # workspace/repo shorthand
+        parts = [p.removesuffix(".git") for p in url.split("/") if p]
+        if len(parts) != 2:
             raise ValueError(
                 f"Invalid repo format '{repo_url}'. "
-                "Expected 'workspace/repo' or full Bitbucket URL."
+                "Expected 'workspace/repo', full HTTPS URL, or SSH URL."
             )
         return parts[0], parts[1]
 
@@ -590,6 +987,10 @@ class AnalysisService:
             pr_fetch_status=record.pr_fetch_status,
             pr_count=record.pr_count,
             pr_fetch_error=record.pr_fetch_error,
+            branches=_parse_json_list(getattr(record, "branches", "[]")),
+            indexed_branches=_parse_json_list(getattr(record, "indexed_branches", "[]")),
+            current_branch=getattr(record, "current_branch", ""),
+            total_branches=getattr(record, "total_branches", 0),
         )
 
     @staticmethod
