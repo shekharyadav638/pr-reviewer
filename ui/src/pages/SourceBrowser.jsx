@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
-import { listBranches, browseSource, readSourceFile, syncRepo } from "../api/client";
+import { useLocation } from "react-router-dom";
+import { listBranches, browseSource, readSourceFile, syncRepo, getRepo } from "../api/client";
 
 function FileIcon({ type, name }) {
   if (type === "dir") return <span style={{ marginRight: 6 }}>📁</span>;
@@ -20,7 +21,12 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function SourceBrowser({ repo }) {
+export default function SourceBrowser({ repo: propRepo }) {
+  const location = useLocation();
+  const searchParams = new URLSearchParams(location.search);
+  const urlRepoId = searchParams.get('repoId');
+
+  const [repo, setRepo]           = useState(propRepo || null);
   const [branches, setBranches]   = useState([]);
   const [branch, setBranch]       = useState("");
   const [path, setPath]           = useState("");
@@ -30,7 +36,16 @@ export default function SourceBrowser({ repo }) {
   const [syncing, setSyncing]     = useState(false);
   const [error, setError]         = useState("");
 
-  const repoId = repo?.id;
+  const repoId = repo?.id || urlRepoId;
+
+  // Fetch repo if only repoId is provided via URL
+  useEffect(() => {
+    if (!propRepo && urlRepoId) {
+      getRepo(urlRepoId).then(setRepo).catch(console.error);
+    } else if (propRepo) {
+      setRepo(propRepo);
+    }
+  }, [propRepo, urlRepoId]);
 
   // Load branches, then browse root of the first one
   useEffect(() => {

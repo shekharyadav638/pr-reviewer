@@ -215,6 +215,8 @@ class PRListItem(BaseModel):
     created_at: str
     updated_at: str
     pr_url: str
+    source_branch: str = ""
+    target_branch: str = ""
 
 
 class SourceEntry(BaseModel):

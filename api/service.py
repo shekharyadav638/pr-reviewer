@@ -648,6 +648,8 @@ class AnalysisService:
                     f"https://bitbucket.org/{record.workspace}/"
                     f"{record.repo_slug}/pull-requests/{pr['id']}"
                 ),
+                source_branch=pr.get("source", {}).get("branch", {}).get("name", ""),
+                target_branch=pr.get("destination", {}).get("branch", {}).get("name", ""),
             ))
         return items
 
