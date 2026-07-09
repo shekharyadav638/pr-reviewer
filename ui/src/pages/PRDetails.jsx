@@ -1,7 +1,7 @@
 import { Icon } from '@iconify/react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useState, useEffect } from 'react';
-import { getRepo, getRepoPRs, analyzeHybrid, postReviewComments } from '../api/client';
+import { getRepo, getRepoPRs, analyzeHybrid, postReviewComments, getPRReview, savePRReview } from '../api/client';
 import Spinner from '../components/Spinner';
 
 function timeAgo(dateString) {
@@ -63,6 +63,10 @@ export default function PRDetails() {
         }
 
         setPr(targetPr);
+
+        // Load cached review from backend (shared across all users)
+        const cached = await getPRReview(repoId, prId).catch(() => null);
+        if (cached) setReview(cached);
       } catch (err) {
         console.error("Failed to load PR details:", err);
       } finally {
@@ -78,6 +82,8 @@ export default function PRDetails() {
     try {
       const data = await analyzeHybrid(pr.pr_url);
       setReview(data);
+      // Persist result to backend so all users see it without re-running
+      await savePRReview(repoId, prId, data).catch(() => {});
     } catch (e) {
       alert("Analysis failed: " + e.message);
     } finally {
@@ -218,14 +224,21 @@ export default function PRDetails() {
               </button>
             )}
 
-            <button 
-              onClick={handleAnalyze}
-              disabled={reviewing}
-              className="px-4 py-2 bg-white border border-slate-200 rounded-lg text-[13px] font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-sm transition-all flex items-center gap-2 disabled:opacity-50"
-            >
-              <Icon icon={reviewing ? "lucide:loader-2" : "lucide:refresh-cw"} className={reviewing ? "animate-spin text-brand-500" : "text-slate-400"} />
-              {reviewing ? 'Analyzing...' : review ? 'Re-analyze' : 'Run AI Analysis'}
-            </button>
+            <div className="flex flex-col items-end gap-1">
+              <button 
+                onClick={handleAnalyze}
+                disabled={reviewing}
+                className="px-4 py-2 bg-white border border-slate-200 rounded-lg text-[13px] font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-sm transition-all flex items-center gap-2 disabled:opacity-50"
+              >
+                <Icon icon={reviewing ? "lucide:loader-2" : "lucide:refresh-cw"} className={reviewing ? "animate-spin text-brand-500" : "text-slate-400"} />
+                {reviewing ? 'Analyzing...' : review ? 'Re-analyze' : 'Run AI Analysis'}
+              </button>
+              {review?._reviewed_at && (
+                <span className="text-[11px] text-slate-400">
+                  Last analysed {timeAgo(review._reviewed_at)}
+                </span>
+              )}
+            </div>
           </div>
         </div>
         

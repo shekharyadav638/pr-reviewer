@@ -8,7 +8,7 @@ export default function WebhookSetup() {
   const [registering, setRegistering] = useState(null);
 
   // You can set the host manually or dynamically
-  const webhookUrl = "http://localhost:8000/webhook/bitbucket";
+  const webhookUrl = `${window.location.origin}/webhook/bitbucket`;
 
   useEffect(() => {
     async function loadRepos() {

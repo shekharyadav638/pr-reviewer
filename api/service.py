@@ -70,6 +70,15 @@ class AnalysisService:
         report: HybridReport = builder.build_report(pr_url)
         return self._to_hybrid_response(report)
 
+    def get_cached_pr_review(self, repo_id: int, pr_id: int) -> dict | None:
+        """Return the cached review result for a PR, or None if never analysed."""
+        return self._repo_store().get_pr_review(repo_id, pr_id)
+
+    def save_pr_review_cache(self, repo_id: int, pr_id: int, result: dict) -> None:
+        """Persist an analysis result so all users can see it without re-running."""
+        self._repo_store().save_pr_review(repo_id, pr_id, result)
+
+
     def _auto_sync_clone(self, workspace: str, repo_slug: str) -> None:
         """Quick git fetch on the cloned repo before analysis."""
         from repos.cloner import clone_dir

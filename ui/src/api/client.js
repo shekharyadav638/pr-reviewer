@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 async function apiRequest(method, endpoint, body) {
   const options = {
@@ -115,4 +115,13 @@ export async function refreshBitbucketRepos() {
 
 export async function listBitbucketWorkspaces() {
   return apiRequest("GET", "/bitbucket/workspaces");
+}
+
+// ─── PR Review cache ────────────────────────────────
+export async function getPRReview(repoId, prId) {
+  return apiRequest("GET", `/repos/${repoId}/prs/${prId}/review`);
+}
+
+export async function savePRReview(repoId, prId, result) {
+  return apiRequest("POST", `/repos/${repoId}/prs/${prId}/review`, result);
 }
