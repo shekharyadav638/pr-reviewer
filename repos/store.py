@@ -129,6 +129,16 @@ class RepoStore:
                     fetched_at  TEXT NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pr_reviews (
+                    repo_id     INTEGER NOT NULL,
+                    pr_id       INTEGER NOT NULL,
+                    result_json TEXT    NOT NULL,
+                    reviewed_at TEXT    NOT NULL,
+                    PRIMARY KEY (repo_id, pr_id)
+                )
+            """)
+
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(repos)")}
@@ -387,3 +397,36 @@ class RepoStore:
                 "UPDATE repos SET indexed_branches=? WHERE id=?",
                 (json.dumps(existing), repo_id),
             )
+
+    # ------------------------------------------------------------------ #
+    # PR review cache                                                      #
+    # ------------------------------------------------------------------ #
+
+    def save_pr_review(self, repo_id: int, pr_id: int, result: dict) -> None:
+        """Upsert the analysis result for a PR so all users see the same result."""
+        import json
+        now = datetime.utcnow().isoformat()
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                """INSERT INTO pr_reviews (repo_id, pr_id, result_json, reviewed_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(repo_id, pr_id) DO UPDATE SET
+                       result_json = excluded.result_json,
+                       reviewed_at = excluded.reviewed_at""",
+                (repo_id, pr_id, json.dumps(result), now),
+            )
+
+    def get_pr_review(self, repo_id: int, pr_id: int) -> dict | None:
+        """Return the cached review for a PR, or None if never analysed."""
+        import json
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT result_json, reviewed_at FROM pr_reviews WHERE repo_id=? AND pr_id=?",
+                (repo_id, pr_id),
+            ).fetchone()
+        if not row:
+            return None
+        result = json.loads(row["result_json"])
+        result["_reviewed_at"] = row["reviewed_at"]
+        return result
+

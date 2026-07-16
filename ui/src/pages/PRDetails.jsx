@@ -1,8 +1,10 @@
 import { Icon } from '@iconify/react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { useState, useEffect } from 'react';
-import { getRepo, getRepoPRs, analyzeHybrid, postReviewComments } from '../api/client';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { getRepo, getRepoPRs, analyzeHybrid, postReviewComments, getPRReview, savePRReview, getPRDiff, postPRComment } from '../api/client';
 import Spinner from '../components/Spinner';
+import { parseDiff, FileDiff } from '../components/DiffViewer';
+import FileTree from '../components/FileTree';
 
 function timeAgo(dateString) {
   if (!dateString) return '';
@@ -39,6 +41,16 @@ export default function PRDetails() {
   // Accordion states
   const [expandedSection, setExpandedSection] = useState('static');
 
+  // New tab and diff state
+  const [tab, setTab] = useState('changes');
+  const [diff, setDiff] = useState(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState(null);
+  const [reviewComments, setReviewComments] = useState([]);
+  
+  const [activeFile, setActiveFile] = useState(null);
+  const fileRefs = useRef({});
+
   useEffect(() => {
     if (!repoId || !prId) return;
     
@@ -63,6 +75,10 @@ export default function PRDetails() {
         }
 
         setPr(targetPr);
+
+        // Load cached review from backend (shared across all users)
+        const cached = await getPRReview(repoId, prId).catch(() => null);
+        if (cached) setReview(cached);
       } catch (err) {
         console.error("Failed to load PR details:", err);
       } finally {
@@ -72,12 +88,24 @@ export default function PRDetails() {
     loadData();
   }, [repoId, prId]);
 
+  useEffect(() => {
+    if (!repoId || !prId) return;
+    setDiffLoading(true);
+    getPRDiff(repoId, prId)
+      .then(data => setDiff(data))
+      .catch(e => setDiffError(e.message))
+      .finally(() => setDiffLoading(false));
+  }, [repoId, prId]);
+
   async function handleAnalyze() {
     if (!pr) return;
     setReviewing(true);
+    setTab('review');
     try {
       const data = await analyzeHybrid(pr.pr_url);
       setReview(data);
+      // Persist result to backend so all users see it without re-running
+      await savePRReview(repoId, prId, data).catch(() => {});
     } catch (e) {
       alert("Analysis failed: " + e.message);
     } finally {
@@ -97,6 +125,48 @@ export default function PRDetails() {
       setPosting(false);
     }
   }
+
+  async function handleAddComment(filepath, line, text) {
+    try {
+      await postPRComment(repo.id, pr.pr_id, text, filepath, line);
+      setReviewComments(prev => [...prev, { filepath, line, text }]);
+    } catch (e) {
+      alert(`Failed to post comment: ${e.message}`);
+    }
+  }
+
+  const parsedFiles = useMemo(() => diff?.diff ? parseDiff(diff.diff) : [], [diff]);
+  const aiIssues = useMemo(() => review ? [
+    ...(review.llm_detected_issues || []),
+    ...(review.llm_security_concerns || []),
+    ...(review.static_analysis_issues || []).map(i => ({ file: i.file, description: `[${i.rule || 'Lint'}] ${i.message}` })),
+  ] : [], [review]);
+
+  useEffect(() => {
+    if (tab !== 'changes' || parsedFiles.length === 0) return;
+
+    const observer = new IntersectionObserver((entries) => {
+      let visiblePath = null;
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          visiblePath = entry.target.dataset.path;
+        }
+      });
+      if (visiblePath) {
+        setActiveFile(visiblePath);
+      }
+    }, {
+      root: document.getElementById('diff-scroll-container'),
+      rootMargin: '-20% 0px -80% 0px',
+      threshold: 0
+    });
+
+    Object.values(fileRefs.current).forEach(el => {
+      if (el) observer.observe(el);
+    });
+
+    return () => observer.disconnect();
+  }, [tab, parsedFiles]);
 
   if (loading) {
     return (
@@ -218,14 +288,21 @@ export default function PRDetails() {
               </button>
             )}
 
-            <button 
-              onClick={handleAnalyze}
-              disabled={reviewing}
-              className="px-4 py-2 bg-white border border-slate-200 rounded-lg text-[13px] font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-sm transition-all flex items-center gap-2 disabled:opacity-50"
-            >
-              <Icon icon={reviewing ? "lucide:loader-2" : "lucide:refresh-cw"} className={reviewing ? "animate-spin text-brand-500" : "text-slate-400"} />
-              {reviewing ? 'Analyzing...' : review ? 'Re-analyze' : 'Run AI Analysis'}
-            </button>
+            <div className="flex flex-col items-end gap-1">
+              <button 
+                onClick={handleAnalyze}
+                disabled={reviewing}
+                className="px-4 py-2 bg-white border border-slate-200 rounded-lg text-[13px] font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-sm transition-all flex items-center gap-2 disabled:opacity-50"
+              >
+                <Icon icon={reviewing ? "lucide:loader-2" : "lucide:refresh-cw"} className={reviewing ? "animate-spin text-brand-500" : "text-slate-400"} />
+                {reviewing ? 'Analyzing...' : review ? 'Re-analyze' : 'Run AI Analysis'}
+              </button>
+              {review?._reviewed_at && (
+                <span className="text-[11px] text-slate-400">
+                  Last analysed {timeAgo(review._reviewed_at)}
+                </span>
+              )}
+            </div>
           </div>
         </div>
         
@@ -238,11 +315,97 @@ export default function PRDetails() {
         )}
       </header>
 
-      {/* Scrollable Content Body */}
-      <div className="flex-1 overflow-y-auto p-6 lg:p-8">
-        <div className="max-w-5xl mx-auto space-y-6">
+      {/* Tabs */}
+      <div className="flex border-b border-slate-200 bg-white px-6 shrink-0 z-10 shadow-sm">
+        <button
+          onClick={() => setTab('changes')}
+          className={`px-4 py-3 text-sm font-semibold border-b-2 transition-colors flex items-center gap-2 ${
+            tab === 'changes'
+              ? 'border-brand-500 text-brand-700'
+              : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          Files Changed
+          {parsedFiles.length > 0 && (
+            <span className="bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 text-xs border border-slate-200 font-medium">
+              {parsedFiles.length}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setTab('review')}
+          className={`px-4 py-3 text-sm font-semibold border-b-2 transition-colors flex items-center gap-2 ${
+            tab === 'review'
+              ? 'border-brand-500 text-brand-700'
+              : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          Review Analysis
+          {review && (
+            <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${
+              riskLevel === "HIGH" ? "bg-rose-100 text-rose-700 border border-rose-200" :
+              riskLevel === "MEDIUM" ? "bg-amber-100 text-amber-700 border border-amber-200" :
+              "bg-emerald-100 text-emerald-700 border border-emerald-200"
+            }`}>
+              {riskLevel}
+            </span>
+          )}
+        </button>
+      </div>
 
-          {!review && !reviewing && (
+      {/* Scrollable Content Body */}
+      <div className={`flex-1 overflow-hidden flex flex-col ${tab === 'changes' ? 'bg-white' : 'p-6 lg:p-8 overflow-y-auto'}`}>
+        <div className={tab === 'changes' ? 'flex-1 flex overflow-hidden' : 'max-w-5xl mx-auto space-y-6'}>
+
+          {tab === 'changes' && (
+            <>
+              {/* Sidebar File Tree */}
+              <div className="w-80 shrink-0 border-r border-slate-200 bg-slate-50 flex flex-col">
+                <FileTree 
+                  parsedFiles={parsedFiles}
+                  activeFile={activeFile}
+                  onSelectFile={(path) => {
+                    setActiveFile(path);
+                    if (fileRefs.current[path]) {
+                      fileRefs.current[path].scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }
+                  }}
+                />
+              </div>
+
+              {/* Diff Viewer Area */}
+              <div 
+                id="diff-scroll-container"
+                className="flex-1 overflow-y-auto p-6 bg-white relative"
+              >
+                <div className="max-w-[1000px] mx-auto space-y-6 pb-[50vh]">
+                  {diffLoading && <div className="text-center py-8 text-slate-500"><Spinner /><p className="mt-2 text-sm font-medium">Loading changes...</p></div>}
+                  {diffError && <div className="p-4 bg-rose-50 border border-rose-200 text-rose-700 rounded-lg text-sm">{diffError}</div>}
+                  {!diffLoading && !diffError && parsedFiles.length === 0 && (
+                    <div className="text-center py-8 text-slate-500">No diff available for this PR.</div>
+                  )}
+                  {!diffLoading && parsedFiles.map((file, i) => (
+                    <div 
+                      key={i} 
+                      ref={el => fileRefs.current[file.path] = el}
+                      data-path={file.path}
+                    >
+                      <FileDiff
+                        file={file}
+                        onAddComment={handleAddComment}
+                        reviewComments={reviewComments}
+                        aiIssues={aiIssues}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+
+          {tab === 'review' && (
+            <>
+              {!review && !reviewing && (
             <div className="bg-white border border-slate-200 rounded-xl p-12 text-center shadow-sm">
               <div className="w-16 h-16 bg-brand-50 rounded-2xl flex items-center justify-center mx-auto mb-4">
                 <Icon icon="lucide:sparkles" className="text-brand-500 text-3xl" />
@@ -270,105 +433,66 @@ export default function PRDetails() {
 
           {review && !reviewing && (
             <>
-              {/* Top Summary Grid */}
+              {/* Top Summary Stats */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {/* Stat: Security */}
-                <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-                  <div className="flex items-center gap-2 text-slate-500 mb-2">
-                    <Icon icon="lucide:alert-triangle" className="text-[15px]" />
-                    <span className="text-[12px] font-medium uppercase tracking-wider">Security</span>
+                <div className={`border rounded-xl p-4 shadow-sm ${securityIssuesCount > 0 ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'}`}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${securityIssuesCount > 0 ? 'bg-rose-100' : 'bg-emerald-50'}`}>
+                      <Icon icon={securityIssuesCount > 0 ? "lucide:shield-alert" : "lucide:shield-check"} className={`text-[14px] ${securityIssuesCount > 0 ? 'text-rose-600' : 'text-emerald-600'}`} />
+                    </div>
+                    <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Security</span>
                   </div>
-                  <div className="flex items-end gap-2">
-                    <span className="text-2xl font-bold text-slate-900">{securityIssuesCount}</span>
-                    <span className={`text-[13px] mb-1 font-medium flex items-center gap-1 ${securityIssuesCount === 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {securityIssuesCount === 0 ? <><Icon icon="lucide:check-circle" className="text-[12px]" /> Clean</> : 'Issues found'}
+                  <div className="flex items-baseline gap-1.5">
+                    <span className={`text-2xl font-bold ${securityIssuesCount > 0 ? 'text-rose-700' : 'text-slate-900'}`}>{securityIssuesCount}</span>
+                    <span className={`text-[13px] font-medium ${securityIssuesCount === 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {securityIssuesCount === 0 ? 'No issues' : 'Issues found'}
                     </span>
                   </div>
                 </div>
 
                 {/* Stat: Static Analysis */}
-                <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-                  <div className="flex items-center gap-2 text-slate-500 mb-2">
-                    <Icon icon="lucide:code-2" className="text-[15px]" />
-                    <span className="text-[12px] font-medium uppercase tracking-wider">Static Analysis</span>
+                <div className={`border rounded-xl p-4 shadow-sm ${staticIssuesCount > 0 ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'}`}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${staticIssuesCount > 0 ? 'bg-amber-100' : 'bg-slate-100'}`}>
+                      <Icon icon="lucide:code-2" className={`text-[14px] ${staticIssuesCount > 0 ? 'text-amber-600' : 'text-slate-500'}`} />
+                    </div>
+                    <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Static Analysis</span>
                   </div>
-                  <div className="flex items-end gap-2">
-                    <span className="text-2xl font-bold text-slate-900">{staticIssuesCount}</span>
-                    <span className={`text-[13px] mb-1 font-medium ${staticIssuesCount === 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className={`text-2xl font-bold ${staticIssuesCount > 0 ? 'text-amber-700' : 'text-slate-900'}`}>{staticIssuesCount}</span>
+                    <span className={`text-[13px] font-medium ${staticIssuesCount === 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
                       {staticIssuesCount === 0 ? 'No warnings' : 'Warnings'}
                     </span>
                   </div>
                 </div>
 
-                {/* Stat: AI Issues */}
+                {/* Stat: AI Suggestions */}
                 <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-                  <div className="flex items-center gap-2 text-slate-500 mb-2">
-                    <Icon icon="lucide:message-square" className="text-[15px]" />
-                    <span className="text-[12px] font-medium uppercase tracking-wider">AI Suggestions</span>
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center">
+                      <Icon icon="lucide:sparkles" className="text-[14px] text-indigo-500" />
+                    </div>
+                    <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">AI Suggestions</span>
                   </div>
-                  <div className="flex items-end gap-2">
+                  <div className="flex items-baseline gap-1.5">
                     <span className="text-2xl font-bold text-slate-900">{issueCount}</span>
-                    <span className="text-[13px] text-slate-500 mb-1">Total comments to post</span>
+                    <span className="text-[13px] text-slate-500">total findings</span>
                   </div>
                 </div>
               </div>
 
-              {/* Main AI Review Section */}
-              <div className="bg-white border border-brand-200 rounded-xl shadow-sm overflow-hidden">
-                {/* Header */}
-                <div className="bg-gradient-to-r from-brand-50 to-white px-5 py-4 border-b border-brand-100 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-brand-500 flex items-center justify-center shadow-sm">
-                      <Icon icon="lucide:sparkles" className="text-white text-[16px]" />
-                    </div>
-                    <div>
-                      <h2 className="text-[15px] font-semibold text-slate-900">GPT-4 Executive Summary</h2>
-                      <p className="text-[12px] text-slate-500">Comprehensive narrative review of the changes</p>
-                    </div>
-                  </div>
-                </div>
-                {/* Content */}
-                <div className="p-5 lg:p-6">
-                  <div className="prose prose-slate prose-sm max-w-none">
-                    <p className="text-[14px] leading-relaxed text-slate-700 whitespace-pre-wrap">
-                      {review.llm_summary || "No summary provided by the model."}
-                    </p>
-                    
-                    {/* Render specific highlights if present */}
-                    {(review.llm_performance_concerns?.length > 0 || review.llm_improvements?.length > 0) && (
-                      <>
-                        <h4 className="text-[13px] font-bold text-slate-900 mt-6 mb-3 uppercase tracking-wider">Key Findings</h4>
-                        <ul className="space-y-2 text-[14px] text-slate-700 list-none pl-0">
-                          {review.llm_performance_concerns?.map((item, i) => (
-                            <li key={i} className="flex items-start gap-2 bg-amber-50 p-3 rounded-lg border border-amber-100">
-                              <Icon icon="lucide:activity" className="text-amber-500 mt-0.5 shrink-0" />
-                              <span><strong>Performance:</strong> {item.description || item.message}</span>
-                            </li>
-                          ))}
-                          {review.llm_improvements?.map((item, i) => (
-                            <li key={i} className="flex items-start gap-2 bg-blue-50 p-3 rounded-lg border border-blue-100">
-                              <Icon icon="lucide:lightbulb" className="text-blue-500 mt-0.5 shrink-0" />
-                              <span><strong>Suggestion:</strong> {item.description || item.message}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* The 7-Layer Detailed Analysis (Accordions) */}
+              {/* Detailed Findings — Accordion Sections */}
               <div className="space-y-3">
-                <h3 className="text-[13px] font-bold text-slate-400 tracking-wider uppercase ml-1 mb-4 mt-8">
-                  Detailed Findings
+                <h3 className="text-[11px] font-bold text-slate-400 tracking-widest uppercase ml-1 mt-2">
+                  Findings
                 </h3>
 
-                {/* Layer: Security Scanning */}
+                {/* Security */}
                 <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-                  <div 
+                  <div
                     onClick={() => setExpandedSection(expandedSection === 'security' ? null : 'security')}
-                    className={`px-5 py-4 flex items-center justify-between cursor-pointer transition-colors ${expandedSection === 'security' ? 'bg-slate-50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
+                    className={`px-5 py-4 flex items-center justify-between cursor-pointer transition-colors select-none ${expandedSection === 'security' ? 'bg-slate-50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
                   >
                     <div className="flex items-center gap-3">
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${securityIssuesCount > 0 ? 'bg-rose-100' : 'bg-emerald-50'}`}>
@@ -380,39 +504,45 @@ export default function PRDetails() {
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
-                      <span className={`text-[12px] font-bold px-2 py-0.5 rounded ${securityIssuesCount > 0 ? 'text-rose-700 bg-rose-100/50' : 'text-emerald-700 bg-emerald-100/50'}`}>
+                      <span className={`text-[12px] font-bold px-2.5 py-0.5 rounded-full ${securityIssuesCount > 0 ? 'text-rose-700 bg-rose-100' : 'text-emerald-700 bg-emerald-100'}`}>
                         {securityIssuesCount} Vulnerabilities
                       </span>
                       <Icon icon={expandedSection === 'security' ? "lucide:chevron-up" : "lucide:chevron-down"} className="text-slate-400" />
                     </div>
                   </div>
-                  {/* Content */}
                   {expandedSection === 'security' && (
-                    <div className="p-0">
+                    <div>
                       {securityIssuesCount === 0 ? (
-                        <div className="px-5 py-4 text-sm text-slate-500 text-center italic">No security vulnerabilities found.</div>
+                        <div className="px-5 py-6 text-sm text-slate-400 text-center flex flex-col items-center gap-2">
+                          <Icon icon="lucide:shield-check" className="text-emerald-400 text-2xl" />
+                          No security vulnerabilities found.
+                        </div>
                       ) : (
-                        review.llm_security_concerns.map((issue, idx) => (
-                          <div key={idx} className="border-b border-slate-100 px-5 py-3 last:border-b-0 hover:bg-slate-50 transition-colors">
-                            <div className="flex items-start gap-3">
-                              <Icon icon="lucide:shield-alert" className="text-rose-500 mt-0.5 text-[16px]" />
-                              <div>
-                                <p className="text-[13px] font-medium text-slate-900 mb-1">{issue.description || issue.message}</p>
-                                <p className="text-[12px] font-mono text-slate-500">{issue.file}{issue.line ? `:${issue.line}` : ''}</p>
+                        <div className="divide-y divide-slate-100">
+                          {review.llm_security_concerns.map((issue, idx) => (
+                            <div key={idx} className="px-5 py-3.5 hover:bg-rose-50/40 transition-colors">
+                              <div className="flex items-start gap-3">
+                                <Icon icon="lucide:shield-alert" className="text-rose-500 mt-0.5 text-[15px] shrink-0" />
+                                <div className="min-w-0">
+                                  <p className="text-[13px] font-medium text-slate-900 leading-snug">{issue.description || issue.message}</p>
+                                  {(issue.file || issue.line) && (
+                                    <p className="text-[11px] font-mono text-slate-400 mt-1">{issue.file}{issue.line ? `:${issue.line}` : ''}</p>
+                                  )}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        ))
+                          ))}
+                        </div>
                       )}
                     </div>
                   )}
                 </div>
 
-                {/* Layer: Static Analysis */}
+                {/* Static Analysis */}
                 <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-                  <div 
+                  <div
                     onClick={() => setExpandedSection(expandedSection === 'static' ? null : 'static')}
-                    className={`px-5 py-4 flex items-center justify-between cursor-pointer transition-colors ${expandedSection === 'static' ? 'bg-slate-50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
+                    className={`px-5 py-4 flex items-center justify-between cursor-pointer transition-colors select-none ${expandedSection === 'static' ? 'bg-slate-50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
                   >
                     <div className="flex items-center gap-3">
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${staticIssuesCount > 0 ? 'bg-amber-100' : 'bg-slate-100'}`}>
@@ -424,67 +554,157 @@ export default function PRDetails() {
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
-                      <span className={`text-[12px] font-bold px-2 py-0.5 rounded ${staticIssuesCount > 0 ? 'text-amber-700 bg-amber-100/50' : 'text-slate-600 bg-slate-100'}`}>
+                      <span className={`text-[12px] font-bold px-2.5 py-0.5 rounded-full ${staticIssuesCount > 0 ? 'text-amber-700 bg-amber-100' : 'text-slate-500 bg-slate-100'}`}>
                         {staticIssuesCount} Warnings
                       </span>
                       <Icon icon={expandedSection === 'static' ? "lucide:chevron-up" : "lucide:chevron-down"} className="text-slate-400" />
                     </div>
                   </div>
-                  {/* Content */}
                   {expandedSection === 'static' && (
-                    <div className="p-0">
+                    <div>
                       {staticIssuesCount === 0 ? (
-                        <div className="px-5 py-4 text-sm text-slate-500 text-center italic">No static analysis warnings found.</div>
+                        <div className="px-5 py-6 text-sm text-slate-400 text-center flex flex-col items-center gap-2">
+                          <Icon icon="lucide:check-circle" className="text-emerald-400 text-2xl" />
+                          No static analysis warnings found.
+                        </div>
                       ) : (
-                        review.static_analysis_issues.map((issue, idx) => (
-                          <div key={idx} className="border-b border-slate-100 px-5 py-3 last:border-b-0 hover:bg-slate-50 transition-colors">
-                            <div className="flex items-start gap-3">
-                              <Icon icon="lucide:alert-triangle" className="text-amber-500 mt-0.5 text-[14px]" />
-                              <div>
-                                <p className="text-[13px] font-medium text-slate-900 mb-0.5">[{issue.rule || 'Lint'}] {issue.message || issue.description}</p>
-                                <p className="text-[12px] font-mono text-slate-500">{issue.file}{issue.line ? `:${issue.line}` : ''}</p>
+                        <div className="divide-y divide-slate-100">
+                          {review.static_analysis_issues.map((issue, idx) => (
+                            <div key={idx} className="px-5 py-3.5 hover:bg-amber-50/40 transition-colors">
+                              <div className="flex items-start gap-3">
+                                <Icon icon="lucide:alert-triangle" className="text-amber-500 mt-0.5 text-[14px] shrink-0" />
+                                <div className="min-w-0">
+                                  <p className="text-[13px] font-medium text-slate-900 leading-snug">
+                                    {issue.rule && <span className="text-[11px] font-mono text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded mr-2">{issue.rule}</span>}
+                                    {issue.message || issue.description}
+                                  </p>
+                                  {issue.file && (
+                                    <p className="text-[11px] font-mono text-slate-400 mt-1">{issue.file}{issue.line ? `:${issue.line}` : ''}</p>
+                                  )}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        ))
+                          ))}
+                        </div>
                       )}
                     </div>
                   )}
                 </div>
 
-                {/* Layer: General AI Issues */}
+                {/* Performance Concerns */}
+                {review.llm_performance_concerns?.length > 0 && (
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                    <div
+                      onClick={() => setExpandedSection(expandedSection === 'perf' ? null : 'perf')}
+                      className={`px-5 py-4 flex items-center justify-between cursor-pointer transition-colors select-none ${expandedSection === 'perf' ? 'bg-slate-50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-orange-50 flex items-center justify-center">
+                          <Icon icon="lucide:activity" className="text-orange-500 text-[16px]" />
+                        </div>
+                        <div>
+                          <h3 className="text-[14px] font-semibold text-slate-900">Performance</h3>
+                          <p className="text-[12px] text-slate-500">Potential bottlenecks and slow paths</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-[12px] font-bold text-orange-700 bg-orange-100 px-2.5 py-0.5 rounded-full">
+                          {review.llm_performance_concerns.length}
+                        </span>
+                        <Icon icon={expandedSection === 'perf' ? "lucide:chevron-up" : "lucide:chevron-down"} className="text-slate-400" />
+                      </div>
+                    </div>
+                    {expandedSection === 'perf' && (
+                      <div className="divide-y divide-slate-100">
+                        {review.llm_performance_concerns.map((item, idx) => (
+                          <div key={idx} className="px-5 py-3.5 hover:bg-orange-50/40 transition-colors">
+                            <div className="flex items-start gap-3">
+                              <Icon icon="lucide:zap" className="text-orange-400 mt-0.5 text-[14px] shrink-0" />
+                              <div className="min-w-0">
+                                <p className="text-[13px] font-medium text-slate-900 leading-snug">{item.description || item.message}</p>
+                                {item.file && <p className="text-[11px] font-mono text-slate-400 mt-1">{item.file}{item.line ? `:${item.line}` : ''}</p>}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Suggestions / Improvements */}
+                {review.llm_improvements?.length > 0 && (
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                    <div
+                      onClick={() => setExpandedSection(expandedSection === 'improvements' ? null : 'improvements')}
+                      className={`px-5 py-4 flex items-center justify-between cursor-pointer transition-colors select-none ${expandedSection === 'improvements' ? 'bg-slate-50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center">
+                          <Icon icon="lucide:lightbulb" className="text-indigo-500 text-[16px]" />
+                        </div>
+                        <div>
+                          <h3 className="text-[14px] font-semibold text-slate-900">Suggestions</h3>
+                          <p className="text-[12px] text-slate-500">Improvements and best practices</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-[12px] font-bold text-indigo-700 bg-indigo-100 px-2.5 py-0.5 rounded-full">
+                          {review.llm_improvements.length}
+                        </span>
+                        <Icon icon={expandedSection === 'improvements' ? "lucide:chevron-up" : "lucide:chevron-down"} className="text-slate-400" />
+                      </div>
+                    </div>
+                    {expandedSection === 'improvements' && (
+                      <div className="divide-y divide-slate-100">
+                        {review.llm_improvements.map((item, idx) => (
+                          <div key={idx} className="px-5 py-3.5 hover:bg-indigo-50/40 transition-colors">
+                            <div className="flex items-start gap-3">
+                              <Icon icon="lucide:lightbulb" className="text-indigo-400 mt-0.5 text-[14px] shrink-0" />
+                              <div className="min-w-0">
+                                <p className="text-[13px] font-medium text-slate-900 leading-snug">{item.description || item.message}</p>
+                                {item.file && <p className="text-[11px] font-mono text-slate-400 mt-1">{item.file}{item.line ? `:${item.line}` : ''}</p>}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* General Code Comments */}
                 {review.llm_detected_issues?.length > 0 && (
                   <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-                    <div 
+                    <div
                       onClick={() => setExpandedSection(expandedSection === 'general' ? null : 'general')}
-                      className={`px-5 py-4 flex items-center justify-between cursor-pointer transition-colors ${expandedSection === 'general' ? 'bg-slate-50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
+                      className={`px-5 py-4 flex items-center justify-between cursor-pointer transition-colors select-none ${expandedSection === 'general' ? 'bg-slate-50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
                     >
                       <div className="flex items-center gap-3">
                         <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
                           <Icon icon="lucide:message-square" className="text-blue-600 text-[16px]" />
                         </div>
                         <div>
-                          <h3 className="text-[14px] font-semibold text-slate-900">General Code Comments</h3>
+                          <h3 className="text-[14px] font-semibold text-slate-900">Code Comments</h3>
                           <p className="text-[12px] text-slate-500">Logic bugs, architecture flaws</p>
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
-                        <span className="text-[12px] font-bold text-blue-700 bg-blue-100/50 px-2 py-0.5 rounded">
-                          {review.llm_detected_issues.length} Comments
+                        <span className="text-[12px] font-bold text-blue-700 bg-blue-100 px-2.5 py-0.5 rounded-full">
+                          {review.llm_detected_issues.length}
                         </span>
                         <Icon icon={expandedSection === 'general' ? "lucide:chevron-up" : "lucide:chevron-down"} className="text-slate-400" />
                       </div>
                     </div>
-                    {/* Content */}
                     {expandedSection === 'general' && (
-                      <div className="p-0">
+                      <div className="divide-y divide-slate-100">
                         {review.llm_detected_issues.map((issue, idx) => (
-                          <div key={idx} className="border-b border-slate-100 px-5 py-3 last:border-b-0 hover:bg-slate-50 transition-colors">
+                          <div key={idx} className="px-5 py-3.5 hover:bg-blue-50/40 transition-colors">
                             <div className="flex items-start gap-3">
-                              <Icon icon="lucide:message-square" className="text-blue-500 mt-0.5 text-[14px]" />
-                              <div>
-                                <p className="text-[13px] font-medium text-slate-900 mb-0.5">{issue.message || issue.description}</p>
-                                <p className="text-[12px] font-mono text-slate-500">{issue.file}{issue.line ? `:${issue.line}` : ''}</p>
+                              <Icon icon="lucide:message-square" className="text-blue-400 mt-0.5 text-[14px] shrink-0" />
+                              <div className="min-w-0">
+                                <p className="text-[13px] font-medium text-slate-900 leading-snug">{issue.message || issue.description}</p>
+                                {issue.file && <p className="text-[11px] font-mono text-slate-400 mt-1">{issue.file}{issue.line ? `:${issue.line}` : ''}</p>}
                               </div>
                             </div>
                           </div>
@@ -495,6 +715,8 @@ export default function PRDetails() {
                 )}
               </div>
             </>
+          )}
+          </>
           )}
 
           {/* Bottom padding spacer */}

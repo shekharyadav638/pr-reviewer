@@ -128,7 +128,7 @@ class BitbucketClient:
         lines_added = sum(d.get("lines_added", 0) for d in diff_stats)
         lines_deleted = sum(d.get("lines_removed", 0) for d in diff_stats)
         changed_files = [
-            d.get("new", d.get("old", {})).get("path", "unknown")
+            (d.get("new") or d.get("old") or {}).get("path", "unknown")
             for d in diff_stats
         ]
 
@@ -146,7 +146,7 @@ class BitbucketClient:
             1 for a in activity if a.get("approval") is not None
         )
         tasks_count = sum(
-            1 for a in activity if a.get("update", {}).get("changes", {}).get(
+            1 for a in activity if ((a.get("update") or {}).get("changes") or {}).get(
                 "content") is not None and "task" in str(a).lower()
         )
 

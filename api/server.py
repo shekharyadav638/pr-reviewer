@@ -319,6 +319,32 @@ def post_review_comments(repo_id: int, pr_id: int, request: PostReviewCommentsRe
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get(
+    "/repos/{repo_id}/prs/{pr_id}/review",
+    responses={404: {"model": ErrorResponse}},
+)
+def get_pr_review_cache(repo_id: int, pr_id: int):
+    """Return the cached AI review for a PR (null if never analysed)."""
+    result = service.get_cached_pr_review(repo_id, pr_id)
+    if result is None:
+        return None
+    return result
+
+
+@app.post(
+    "/repos/{repo_id}/prs/{pr_id}/review",
+    responses={500: {"model": ErrorResponse}},
+)
+def save_pr_review_cache(repo_id: int, pr_id: int, request: dict):
+    """Save/overwrite the AI review result for a PR."""
+    try:
+        service.save_pr_review_cache(repo_id, pr_id, request)
+        return {"status": "saved"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
 class InlineCommentRequest(BaseModel):
     text: str
     filepath: str
@@ -403,3 +429,25 @@ async def bitbucket_webhook(request: Request):
     except Exception as e:
         logging.exception("Webhook handling failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------------ #
+# Serve Frontend (React SPA)                                         #
+# ------------------------------------------------------------------ #
+import os
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+ui_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "dist")
+
+if os.path.exists(ui_dir):
+    # Mount Vite static assets
+    app.mount("/assets", StaticFiles(directory=os.path.join(ui_dir, "assets")), name="assets")
+
+    # Catch-all route to serve index.html for React Router
+    @app.get("/{full_path:path}")
+    def serve_frontend(full_path: str):
+        file_path = os.path.join(ui_dir, full_path)
+        if os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(ui_dir, "index.html"))
