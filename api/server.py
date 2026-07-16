@@ -379,7 +379,8 @@ def post_pr_comment(repo_id: int, pr_id: int, request: InlineCommentRequest):
 def register_webhook(repo_id: int):
     """Register a PR-created webhook on the Bitbucket repo."""
     import os
-    host = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/") or "http://localhost:8000"
+    domain = os.getenv("DOMAIN", "").strip().rstrip("/")
+    host = f"https://{domain}" if domain else f"http://localhost:{os.getenv('API_PORT', '8000')}"
     callback_url = f"{host}/webhook/bitbucket"
     try:
         return service.register_webhook(repo_id, callback_url)
