@@ -302,8 +302,7 @@ class DependencyScanner:
                 if score > 0:
                     return "LOW"
 
-        # Fall back to database_specific
-        db_sev = vuln.get("database_specific", {}).get("severity", "")
+        db_sev = (vuln.get("database_specific") or {}).get("severity", "")
         if db_sev:
             return db_sev.upper()
 

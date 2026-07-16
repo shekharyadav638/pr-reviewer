@@ -124,14 +124,14 @@ class HybridReportBuilder:
         # Get PR detail for source branch commit + target branch
         pr_detail = self.client.get_pr_detail(workspace, repo_slug, pr_id)
         source_commit = (
-            pr_detail.get("source", {}).get("commit", {}).get("hash", "")
-        )
+            (pr_detail.get("source") or {}).get("commit") or {}
+        ).get("hash", "")
         # The target branch is the ground truth for duplicate + logic analysis.
         # A PR from feature-x→develop must be checked against develop's code;
         # a PR from feature-x→stage must be checked against stage's code.
         target_branch: str = (
-            pr_detail.get("destination", {}).get("branch", {}).get("name", "")
-        )
+            (pr_detail.get("destination") or {}).get("branch") or {}
+        ).get("name", "")
         if target_branch:
             logger.info("PR #%d targets branch '%s' — using branch-scoped index",
                         pr_id, target_branch)
@@ -228,7 +228,7 @@ class HybridReportBuilder:
             workspace, repo_slug, pr_id
         )
         return [
-            d.get("new", d.get("old", {})).get("path", "unknown")
+            (d.get("new") or d.get("old") or {}).get("path", "unknown")
             for d in diff_stats
         ]
 

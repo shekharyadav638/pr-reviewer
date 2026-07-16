@@ -553,8 +553,8 @@ class AnalysisService:
                 workspace = workspace or full_name.split("/")[0]
                 repo_slug = full_name.split("/")[1]
         pr_id      = pr_data.get("id")
-        pr_links   = pr_data.get("links", {})
-        pr_html    = pr_links.get("html", {}).get("href", "")
+        pr_links   = pr_data.get("links") or {}
+        pr_html    = (pr_links.get("html") or {}).get("href", "")
 
         logger.info("Webhook payload: workspace=%r repo=%r pr_id=%r", workspace, repo_slug, pr_id)
 
@@ -657,8 +657,8 @@ class AnalysisService:
                     f"https://bitbucket.org/{record.workspace}/"
                     f"{record.repo_slug}/pull-requests/{pr['id']}"
                 ),
-                source_branch=pr.get("source", {}).get("branch", {}).get("name", ""),
-                target_branch=pr.get("destination", {}).get("branch", {}).get("name", ""),
+                source_branch=((pr.get("source") or {}).get("branch") or {}).get("name", ""),
+                target_branch=((pr.get("destination") or {}).get("branch") or {}).get("name", ""),
             ))
         return items
 
@@ -738,7 +738,7 @@ class AnalysisService:
         diff_stat = client.get_pr_diff_stat(record.workspace, record.repo_slug, pr_id)
         files = [
             {
-                "path": d.get("new", d.get("old", {})).get("path", ""),
+                "path": (d.get("new") or d.get("old") or {}).get("path", ""),
                 "lines_added": d.get("lines_added", 0),
                 "lines_removed": d.get("lines_removed", 0),
                 "status": d.get("status", "modified"),
