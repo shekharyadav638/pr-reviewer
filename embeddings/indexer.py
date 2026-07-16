@@ -48,14 +48,29 @@ def get_chroma_client(workspace: str, repo_slug: str,
 
 
 def get_collection(workspace: str, repo_slug: str,
-                   openai_api_key: str,
+                   settings,
                    branch: str = "") -> chromadb.Collection:
-    """Return (or create) the ChromaDB collection for a specific branch."""
+    """Return (or create) the ChromaDB collection for a specific branch.
+
+    Uses EMBEDDING_* settings to pick the provider:
+      - openai / openrouter / custom: uses OpenAIEmbeddingFunction with base_url
+      - ollama: uses OpenAIEmbeddingFunction pointed at local Ollama endpoint
+    """
     client = get_chroma_client(workspace, repo_slug, branch)
-    ef = embedding_functions.OpenAIEmbeddingFunction(
-        api_key=openai_api_key,
-        model_name="text-embedding-3-small",
-    )
+
+    api_key  = settings.resolved_embedding_api_key
+    model    = settings.embedding_model
+    base_url = settings.resolved_embedding_base_url
+
+    ef_kwargs: dict = {
+        "api_key":    api_key or "ollama",
+        "model_name": model,
+    }
+    if base_url:
+        ef_kwargs["api_base"] = base_url
+
+    ef = embedding_functions.OpenAIEmbeddingFunction(**ef_kwargs)
+
     name = _collection_name(workspace, repo_slug, branch)
     return client.get_or_create_collection(
         name=name,
@@ -102,8 +117,13 @@ class RepoIndexer:
         develop and stage never share the same index.
         Returns total number of chunks indexed.
         """
-        if not self.settings.openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required for repo indexing")
+        if not self.settings.resolved_embedding_api_key and \
+                self.settings.embedding_provider != "ollama":
+            raise ValueError(
+                f"No API key set for embedding provider "
+                f"'{self.settings.embedding_provider}'. "
+                "Set EMBEDDING_API_KEY (or OPENAI_API_KEY) in your .env file."
+            )
 
         def _prog(pct: int, msg: str) -> None:
             if progress_callback:
@@ -131,7 +151,7 @@ class RepoIndexer:
         _prog(5, f"Found {len(source_files)} source files. Building embeddings…")
 
         collection = get_collection(workspace, repo_slug,
-                                    self.settings.openai_api_key,
+                                    self.settings,
                                     branch=branch)
 
         total = len(source_files)

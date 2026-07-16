@@ -24,8 +24,28 @@ class Settings:
     label_long_merge_hours: int = 72
     label_many_commits_threshold: int = 10
 
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4.1"
+    openai_api_key: str = ""       # legacy alias — used if LLM_API_KEY not set
+    openai_model: str = "gpt-4.1"  # legacy alias — used if LLM_MODEL not set
+
+    # ── LLM provider (chat/review) ─────────────────────────────
+    # LLM_PROVIDER:  openai | openrouter | ollama | custom
+    # LLM_BASE_URL:  override API base (e.g. https://openrouter.ai/api/v1)
+    # LLM_API_KEY:   API key for the chosen provider
+    # LLM_MODEL:     model name (e.g. openai/gpt-4o, mistral/mistral-7b)
+    llm_provider: str = "openai"
+    llm_base_url: str = ""          # empty = provider default
+    llm_api_key: str = ""           # empty = falls back to openai_api_key
+    llm_model: str = ""             # empty = falls back to openai_model
+
+    # ── Embedding provider (repo indexing) ─────────────────────
+    # EMBEDDING_PROVIDER: openai | openrouter | ollama | custom
+    # EMBEDDING_BASE_URL: override base URL for embeddings
+    # EMBEDDING_API_KEY:  key for embedding provider
+    # EMBEDDING_MODEL:    e.g. text-embedding-3-small, nomic-embed-text
+    embedding_provider: str = "openai"
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = "text-embedding-3-small"
 
     @classmethod
     def load(cls, env_path: str | None = None) -> "Settings":
@@ -60,4 +80,51 @@ class Settings:
             ),
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
+            # LLM provider
+            llm_provider=os.getenv("LLM_PROVIDER", "openai"),
+            llm_base_url=os.getenv("LLM_BASE_URL", ""),
+            llm_api_key=os.getenv("LLM_API_KEY", ""),
+            llm_model=os.getenv("LLM_MODEL", ""),
+            # Embedding provider
+            embedding_provider=os.getenv("EMBEDDING_PROVIDER", "openai"),
+            embedding_base_url=os.getenv("EMBEDDING_BASE_URL", ""),
+            embedding_api_key=os.getenv("EMBEDDING_API_KEY", ""),
+            embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
         )
+
+    @property
+    def resolved_llm_api_key(self) -> str:
+        """LLM_API_KEY takes priority; falls back to OPENAI_API_KEY."""
+        return self.llm_api_key or self.openai_api_key
+
+    @property
+    def resolved_llm_model(self) -> str:
+        """LLM_MODEL takes priority; falls back to OPENAI_MODEL."""
+        return self.llm_model or self.openai_model
+
+    @property
+    def resolved_embedding_api_key(self) -> str:
+        """EMBEDDING_API_KEY takes priority; falls back to OPENAI_API_KEY."""
+        return self.embedding_api_key or self.openai_api_key
+
+    @property
+    def resolved_llm_base_url(self) -> str | None:
+        """Return explicit base URL, or well-known defaults per provider."""
+        if self.llm_base_url:
+            return self.llm_base_url
+        defaults = {
+            "openrouter": "https://openrouter.ai/api/v1",
+            "ollama":     "http://localhost:11434/v1",
+        }
+        return defaults.get(self.llm_provider)  # None = use SDK default
+
+    @property
+    def resolved_embedding_base_url(self) -> str | None:
+        """Return explicit embedding base URL, or well-known defaults."""
+        if self.embedding_base_url:
+            return self.embedding_base_url
+        defaults = {
+            "openrouter": "https://openrouter.ai/api/v1",
+            "ollama":     "http://localhost:11434/v1",
+        }
+        return defaults.get(self.embedding_provider)

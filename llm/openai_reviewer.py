@@ -2,8 +2,12 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from openai import OpenAI
+
+if TYPE_CHECKING:
+    from config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -61,16 +65,46 @@ class LLMReviewResult:
 
 
 class OpenAIReviewer:
-    def __init__(self, api_key: str | None = None,
-                 model: str = "gpt-4.1"):
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
-        self.model = model
-        if not self.api_key:
+    """
+    LLM-based PR reviewer.
+
+    Works with any OpenAI-compatible provider:
+      - OpenAI        (default)
+      - OpenRouter    (LLM_PROVIDER=openrouter)
+      - Ollama        (LLM_PROVIDER=ollama)
+      - Custom        (LLM_PROVIDER=custom, LLM_BASE_URL=https://...)
+    """
+
+    def __init__(self, settings: "Settings | None" = None,
+                 api_key: str | None = None,
+                 model: str = ""):
+        # Accept a Settings object (preferred) or legacy positional args
+        if settings is not None:
+            resolved_key   = settings.resolved_llm_api_key
+            resolved_model = settings.resolved_llm_model
+            base_url       = settings.resolved_llm_base_url
+            provider       = settings.llm_provider
+        else:
+            resolved_key   = api_key or os.getenv("OPENAI_API_KEY", "")
+            resolved_model = model or os.getenv("OPENAI_MODEL", "gpt-4.1")
+            base_url       = None
+            provider       = "openai"
+
+        if not resolved_key and provider != "ollama":
             raise ValueError(
-                "OpenAI API key not set. "
-                "Set OPENAI_API_KEY in your .env file."
+                f"No API key set for provider '{provider}'. "
+                "Set LLM_API_KEY (or OPENAI_API_KEY) in your .env file."
             )
-        self.client = OpenAI(api_key=self.api_key)
+
+        self.model = resolved_model
+        self.provider = provider
+        logger.info("LLM provider: %s | model: %s | base_url: %s",
+                    provider, self.model, base_url or "(default)")
+
+        client_kwargs: dict = {"api_key": resolved_key or "ollama"}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = OpenAI(**client_kwargs)
 
     def review_diff(self, diff_text: str,
                     pr_title: str = "",

@@ -103,13 +103,11 @@ class HybridReportBuilder:
             logger.warning("No trained model — ML predictions unavailable")
         self.analyzer.load_dataset()
 
-        # Init LLM reviewer
+        # Init LLM reviewer (provider/key/model resolved from settings)
         try:
-            self._llm_reviewer = OpenAIReviewer(
-                api_key=settings.openai_api_key or None,
-                model=settings.openai_model,
-            )
-            logger.info("OpenAI reviewer initialized")
+            self._llm_reviewer = OpenAIReviewer(settings=settings)
+            logger.info("LLM reviewer initialized (provider=%s, model=%s)",
+                        settings.llm_provider, settings.resolved_llm_model)
         except ValueError as e:
             logger.warning("LLM reviewer unavailable: %s", e)
 
