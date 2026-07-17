@@ -62,6 +62,11 @@ def get_collection(workspace: str, repo_slug: str,
     model    = settings.embedding_model
     base_url = settings.resolved_embedding_base_url
 
+    # Suppress Chroma's internal UserWarning during deserialization
+    import os
+    if api_key and not os.getenv("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = api_key
+
     ef_kwargs: dict = {
         "api_key":    api_key or "ollama",
         "model_name": model,
@@ -190,21 +195,40 @@ class RepoIndexer:
                 })
 
                 if len(batch_ids) >= BATCH_SIZE:
-                    collection.upsert(
-                        ids=batch_ids,
-                        documents=batch_docs,
-                        metadatas=batch_metas,
-                    )
+                    self._safe_upsert(collection, batch_ids, batch_docs, batch_metas)
                     indexed_chunks += len(batch_ids)
                     batch_ids, batch_docs, batch_metas = [], [], []
 
         if batch_ids:
-            collection.upsert(
-                ids=batch_ids,
-                documents=batch_docs,
-                metadatas=batch_metas,
-            )
+            self._safe_upsert(collection, batch_ids, batch_docs, batch_metas)
             indexed_chunks += len(batch_ids)
 
         _prog(100, f"Done. Indexed {indexed_chunks} chunks.")
         return indexed_chunks
+
+    def _safe_upsert(self, collection, batch_ids, batch_docs, batch_metas):
+        import time
+        max_retries = 5
+        base_delay = 2
+
+        for attempt in range(max_retries):
+            try:
+                collection.upsert(
+                    ids=batch_ids,
+                    documents=batch_docs,
+                    metadatas=batch_metas,
+                )
+                return
+            except Exception as e:
+                err_msg = str(e).lower()
+                if "rate limit" in err_msg or "429" in err_msg:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning("OpenAI rate limit hit during upsert. Retrying in %ds... (Attempt %d/%d)", 
+                                   delay, attempt + 1, max_retries)
+                    time.sleep(delay)
+                else:
+                    # If it's a different error, we should probably raise it or log it
+                    logger.error("Failed to upsert to ChromaDB: %s", e)
+                    raise e
+        logger.error("Max retries exceeded for ChromaDB upsert due to rate limits.")
+
