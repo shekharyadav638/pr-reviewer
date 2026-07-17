@@ -140,7 +140,6 @@ case "${1:-}" in
     install_deps
     build_ui
     reload_api
-    nginx_config
     echo ""
     info "Done. API on :${API_PORT}${DOMAIN:+, Web on https://$DOMAIN}"
     ;;
