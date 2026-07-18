@@ -355,7 +355,7 @@ export default function PRDetails() {
 
       {/* Scrollable Content Body */}
       <div className={`flex-1 overflow-hidden flex flex-col ${tab === 'changes' ? 'bg-white' : 'p-6 lg:p-8 overflow-y-auto'}`}>
-        <div className={tab === 'changes' ? 'flex-1 flex overflow-hidden' : 'max-w-5xl mx-auto space-y-6'}>
+        <div className={tab === 'changes' ? 'flex-1 flex overflow-hidden' : 'w-full space-y-6'}>
 
           {tab === 'changes' && (
             <>
@@ -434,7 +434,23 @@ export default function PRDetails() {
           {review && !reviewing && (
             <>
               {/* Top Summary Stats */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                {/* Stat: ML Risk */}
+                <div className={`border rounded-xl p-4 shadow-sm ${riskLevel === 'HIGH' ? 'bg-rose-50 border-rose-200' : riskLevel === 'MEDIUM' ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50 border-emerald-200'}`}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${riskLevel === 'HIGH' ? 'bg-rose-100' : riskLevel === 'MEDIUM' ? 'bg-amber-100' : 'bg-emerald-100'}`}>
+                      <Icon icon={riskLevel === 'HIGH' ? "lucide:shield-alert" : "lucide:shield-check"} className={`text-[14px] ${riskLevel === 'HIGH' ? 'text-rose-600' : riskLevel === 'MEDIUM' ? 'text-amber-600' : 'text-emerald-600'}`} />
+                    </div>
+                    <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">ML Risk</span>
+                  </div>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className={`text-2xl font-bold ${riskLevel === 'HIGH' ? 'text-rose-700' : riskLevel === 'MEDIUM' ? 'text-amber-700' : 'text-emerald-700'}`}>{riskLevel}</span>
+                    <span className={`text-[13px] font-medium ${riskLevel === 'HIGH' ? 'text-rose-600' : riskLevel === 'MEDIUM' ? 'text-amber-600' : 'text-emerald-600'}`}>
+                      {review.ml_reasons?.length ? `${review.ml_reasons.length} flags` : 'Score based'}
+                    </span>
+                  </div>
+                </div>
+
                 {/* Stat: Security */}
                 <div className={`border rounded-xl p-4 shadow-sm ${securityIssuesCount > 0 ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'}`}>
                   <div className="flex items-center gap-2 mb-2">
@@ -487,6 +503,46 @@ export default function PRDetails() {
                 <h3 className="text-[11px] font-bold text-slate-400 tracking-widest uppercase ml-1 mt-2">
                   Findings
                 </h3>
+
+                {/* ML Risk Reasons */}
+                {review.ml_reasons?.length > 0 && (
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                    <div
+                      onClick={() => setExpandedSection(expandedSection === 'ml_risk' ? null : 'ml_risk')}
+                      className={`px-5 py-4 flex items-center justify-between cursor-pointer transition-colors select-none ${expandedSection === 'ml_risk' ? 'bg-slate-50 border-b border-slate-100' : 'hover:bg-slate-50'}`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${riskLevel === 'HIGH' ? 'bg-rose-100' : 'bg-amber-100'}`}>
+                          <Icon icon="lucide:brain-circuit" className={`${riskLevel === 'HIGH' ? 'text-rose-600' : 'text-amber-600'} text-[16px]`} />
+                        </div>
+                        <div>
+                          <h3 className="text-[14px] font-semibold text-slate-900">ML Risk Indicators</h3>
+                          <p className="text-[12px] text-slate-500">Heuristics triggered by this PR (commits, diff size, etc.)</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className={`text-[12px] font-bold px-2.5 py-0.5 rounded-full ${riskLevel === 'HIGH' ? 'text-rose-700 bg-rose-100' : 'text-amber-700 bg-amber-100'}`}>
+                          {review.ml_reasons.length} Flags
+                        </span>
+                        <Icon icon={expandedSection === 'ml_risk' ? "lucide:chevron-up" : "lucide:chevron-down"} className="text-slate-400" />
+                      </div>
+                    </div>
+                    {expandedSection === 'ml_risk' && (
+                      <div className="divide-y divide-slate-100">
+                        {review.ml_reasons.map((reason, idx) => (
+                          <div key={idx} className={`px-5 py-3.5 hover:bg-slate-50 transition-colors`}>
+                            <div className="flex items-start gap-3">
+                              <Icon icon="lucide:info" className="text-slate-400 mt-0.5 text-[14px] shrink-0" />
+                              <div className="min-w-0">
+                                <p className="text-[13px] font-medium text-slate-900 leading-snug">{reason}</p>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Security */}
                 <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
