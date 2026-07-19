@@ -40,8 +40,10 @@ Focus on: logical bugs, edge cases, missing validations, performance issues, \
 security vulnerabilities, code smells, and optimization opportunities.\
 """
 
-MAX_DIFF_CHARS = 80_000
-CHUNK_SIZE = 60_000
+# Tunable via env: low-credit OpenRouter accounts cap prompt tokens per
+# request (e.g. 8344), which a 60k-char chunk (~14k tokens) blows past with
+# a 402. Set LLM_CHUNK_CHARS=24000 to fit under such caps without code edits.
+CHUNK_SIZE = int(os.getenv("LLM_CHUNK_CHARS", "60000"))
 
 
 @dataclass
@@ -269,7 +271,7 @@ class OpenAIReviewer:
 
     @staticmethod
     def _chunk_diff(diff_text: str) -> list[str]:
-        if len(diff_text) <= MAX_DIFF_CHARS:
+        if len(diff_text) <= CHUNK_SIZE:
             return [diff_text]
 
         chunks = []
@@ -281,6 +283,17 @@ class OpenAIReviewer:
             prefix = "diff --git " if i > 0 else ""
             segment = prefix + file_diff
 
+            # A single file's diff can exceed CHUNK_SIZE on its own — hard-slice
+            # it, otherwise the chunk cap is only advisory and oversized requests
+            # still hit provider token limits (402/413).
+            if len(segment) > CHUNK_SIZE:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = ""
+                chunks.extend(segment[j:j + CHUNK_SIZE]
+                              for j in range(0, len(segment), CHUNK_SIZE))
+                continue
+
             if len(current_chunk) + len(segment) > CHUNK_SIZE:
                 if current_chunk:
                     chunks.append(current_chunk)
@@ -291,7 +304,7 @@ class OpenAIReviewer:
         if current_chunk:
             chunks.append(current_chunk)
 
-        return chunks if chunks else [diff_text[:MAX_DIFF_CHARS]]
+        return chunks if chunks else [diff_text[:CHUNK_SIZE]]
 
     @staticmethod
     def _merge_results(results: list[LLMReviewResult]) -> LLMReviewResult:
