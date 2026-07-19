@@ -203,6 +203,13 @@ class BitbucketClient:
                                     max_items=max_branches)
         return [b["name"] for b in items if b.get("name")]
 
+    def get_default_branch(self, workspace: str, repo_slug: str) -> str:
+        """Return the repo's actual default branch (Bitbucket's `mainbranch`),
+        e.g. 'master' — never assume it's literally named 'main'."""
+        url = f"{self.base_url}/repositories/{workspace}/{repo_slug}"
+        info = self._get(url)
+        return (info.get("mainbranch") or {}).get("name", "")
+
     def _get_workspace_slugs(self) -> list[str]:
         """Derive workspace slugs. Explicit BITBUCKET_WORKSPACES takes priority."""
         # 1. Explicit config wins — user knows exactly what they want

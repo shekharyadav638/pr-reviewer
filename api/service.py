@@ -188,8 +188,22 @@ class AnalysisService:
         workspace, repo_slug = self._parse_repo_url(repo_url)
         # Normalise to https clone URL
         git_url = self._to_git_url(repo_url)
+
+        # Ask Bitbucket what the repo's default branch actually is —
+        # never assume "main"; plenty of repos still default to "master".
+        default_branch = "main"
+        try:
+            bb = self._make_bb_client()
+            default_branch = (
+                bb.get_default_branch(workspace, repo_slug) or default_branch
+            )
+        except Exception as exc:
+            logger.warning("Could not fetch default branch for %s/%s (%s) — "
+                           "assuming 'main'", workspace, repo_slug, exc)
+
         store = self._repo_store()
-        record = store.add_repo(workspace, repo_slug, git_url=git_url)
+        record = store.add_repo(workspace, repo_slug, git_url=git_url,
+                                default_branch=default_branch)
         return self._repo_to_response(record)
 
     def delete_repo(self, repo_id: int) -> dict:
@@ -260,17 +274,30 @@ class AnalysisService:
             cloner   = self._make_cloner()
 
             # ── Fetch branch list from Bitbucket, keep only main branches ──
+            bb = self._make_bb_client()
             try:
-                bb = self._make_bb_client()
                 all_branches = bb.get_branches(record.workspace, record.repo_slug)
                 branches = [b for b in all_branches if _is_main_branch(b)]
             except Exception as exc:
                 logger.warning("Could not fetch branches from Bitbucket (%s) — "
-                               "falling back to default branch", exc)
-                branches = [record.default_branch or "main"]
+                               "falling back to the repo's default branch", exc)
+                branches = []
 
             if not branches:
-                branches = [record.default_branch or "main"]
+                # None of the fetched branches matched a known env-branch name
+                # (or the fetch failed) — ask Bitbucket what the repo's actual
+                # default branch is instead of assuming "main". Repos like
+                # drupal-fit-portal still default to "master", not "main".
+                actual_default = ""
+                try:
+                    actual_default = bb.get_default_branch(record.workspace, record.repo_slug)
+                except Exception as exc:
+                    logger.warning("Could not fetch default branch for %s/%s: %s",
+                                   record.workspace, record.repo_slug, exc)
+                fallback = actual_default or record.default_branch or "main"
+                if fallback != record.default_branch:
+                    store.update_default_branch(repo_id, fallback)
+                branches = [fallback]
 
             store.update_branches(repo_id, branches)
             total = len(branches)
