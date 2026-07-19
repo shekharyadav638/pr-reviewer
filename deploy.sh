@@ -67,6 +67,18 @@ reload_api() {
 }
 
 nginx_config() {
+  # Certbot injects ssl_certificate lines into this file when HTTPS is set
+  # up. Regenerating from the template would silently wipe them and break
+  # HTTPS (ERR_CERT_COMMON_NAME_INVALID) — so if SSL is present, only patch
+  # values in place and never rewrite the file.
+  if [[ -f "$NGINX_CONF" ]] && sudo grep -q "ssl_certificate" "$NGINX_CONF"; then
+    info "Existing nginx config is certbot-managed — patching timeouts in place..."
+    sudo sed -i -E 's/proxy_read_timeout [0-9]+s;/proxy_read_timeout 900s;/' "$NGINX_CONF"
+    sudo nginx -t && sudo systemctl reload nginx
+    info "nginx reloaded (SSL config preserved)"
+    return
+  fi
+
   info "Writing nginx config..."
   local server_name="${DOMAIN:-_}"
   [[ -n "$DOMAIN" && "$DOMAIN" != www.* ]] && server_name="$DOMAIN www.$DOMAIN"

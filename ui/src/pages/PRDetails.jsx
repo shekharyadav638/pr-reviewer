@@ -62,12 +62,15 @@ export default function PRDetails() {
   // Resume showing "Analyzing..." after a navigation away instead of
   // re-triggering a duplicate run — polls until the server-side review
   // (started by us or another tab) finishes and gets cached.
-  function startPolling() {
+  // `baselineReviewedAt` is the _reviewed_at of the review we already have:
+  // a poll must only accept a NEWER result, otherwise a re-analyze would
+  // instantly "complete" by re-reading the stale cache it's replacing.
+  function startPolling(baselineReviewedAt = null) {
     if (pollRef.current) return;
     pollRef.current = setInterval(async () => {
       try {
         const cached = await getPRReview(repoId, prId);
-        if (cached) {
+        if (cached && cached._reviewed_at !== baselineReviewedAt) {
           stopPolling();
           setReview(cached);
           setReviewing(false);
@@ -75,7 +78,8 @@ export default function PRDetails() {
         }
         const { status } = await getPRReviewStatus(repoId, prId);
         if (status === 'idle') {
-          // Finished (or failed) with nothing cached — stop waiting.
+          // Run ended without producing a newer result (it failed) —
+          // keep whatever we had and stop waiting.
           stopPolling();
           setReviewing(false);
         }
@@ -114,17 +118,17 @@ export default function PRDetails() {
 
         // Load cached review from backend (shared across all users)
         const cached = await getPRReview(repoId, prId).catch(() => null);
-        if (cached) {
-          setReview(cached);
-        } else {
-          // No cached result — check whether a review is already running
-          // (e.g. we started one, then navigated away and came back).
-          const { status } = await getPRReviewStatus(repoId, prId).catch(() => ({ status: 'idle' }));
-          if (status === 'running') {
-            setReviewing(true);
-            setTab('review');
-            startPolling();
-          }
+        if (cached) setReview(cached);
+
+        // Whether or not an older cache exists, a run may be in flight
+        // (e.g. we started one, then navigated away and came back) —
+        // resume waiting for the NEWER result rather than presenting the
+        // stale cache as final.
+        const { status } = await getPRReviewStatus(repoId, prId).catch(() => ({ status: 'idle' }));
+        if (status === 'running') {
+          setReviewing(true);
+          setTab('review');
+          startPolling(cached?._reviewed_at ?? null);
         }
       } catch (err) {
         console.error("Failed to load PR details:", err);
@@ -158,7 +162,7 @@ export default function PRDetails() {
       if (e.status === 409) {
         // Already running (started by us or another tab) — wait for it
         // instead of erroring out or starting a duplicate.
-        startPolling();
+        startPolling(review?._reviewed_at ?? null);
         return;
       }
       // Long reviews outlive the HTTP connection (nginx 504, network drop)
@@ -166,7 +170,7 @@ export default function PRDetails() {
       // still running server-side, keep waiting instead of reporting failure.
       const { status } = await getPRReviewStatus(repoId, prId).catch(() => ({ status: 'idle' }));
       if (status === 'running') {
-        startPolling();
+        startPolling(review?._reviewed_at ?? null);
         return;
       }
       setReviewing(false);
