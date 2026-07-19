@@ -96,6 +96,18 @@ class OpenAIReviewer:
                 "Set LLM_API_KEY (or OPENAI_API_KEY) in your .env file."
             )
 
+        # A provider other than "openai" silently falling back to
+        # OPENAI_API_KEY almost always means LLM_API_KEY was never set —
+        # the request then goes out with a key the real provider's gateway
+        # doesn't recognize, which reads as a generic 401 with no hint why.
+        if (settings is not None and provider != "openai"
+                and not settings.llm_api_key and settings.openai_api_key):
+            logger.warning(
+                "LLM_PROVIDER=%s but LLM_API_KEY is not set — falling back "
+                "to OPENAI_API_KEY, which %s will reject. Set LLM_API_KEY to "
+                "a key issued by %s.", provider, provider, provider,
+            )
+
         self.model = resolved_model
         self.provider = provider
         logger.info("LLM provider: %s | model: %s | base_url: %s",

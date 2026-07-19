@@ -416,6 +416,14 @@ class AnalysisService:
             store.set_current_branch(repo_id, "", total=total)
             logger.info("All %d branches indexed for repo %d", total, repo_id)
 
+            # Fetch this repo's PR history and auto-train the ML risk model
+            # on it — indexing a repo should leave it review-ready, not just
+            # searchable. Runs inline (already off the request thread); its
+            # own status/errors are tracked via pr_fetch_status same as the
+            # standalone "Fetch PRs" action.
+            store.update_pr_fetch_status(repo_id, "fetching")
+            self._fetch_prs_and_train(repo_id, record)
+
         threading.Thread(target=_run, daemon=True).start()
         return {"status": "build_started", "repo_id": repo_id}
 
@@ -803,57 +811,62 @@ class AnalysisService:
             raise ValueError(f"Repo {repo_id} not found")
 
         store.update_pr_fetch_status(repo_id, "fetching")
-
-        def _run():
-            try:
-                import os
-                import pandas as pd
-                from bitbucket.client import BitbucketClient as BBC
-
-                settings = Settings.load()
-                client = BBC(settings)
-                all_prs = []
-
-                for state in ("MERGED", "DECLINED"):
-                    logger.info("Fetching %s PRs for repo %d...", state, repo_id)
-                    raw_prs = client.get_pull_requests(
-                        record.workspace, record.repo_slug,
-                        state=state, limit=500,
-                    )
-                    for pr_raw in raw_prs:
-                        try:
-                            pr_data = client.extract_pr_data(
-                                record.workspace, record.repo_slug, pr_raw
-                            )
-                            all_prs.append(pr_data)
-                        except Exception:
-                            logger.debug("Skipping PR #%s", pr_raw.get("id"))
-
-                # Save to CSV so it can be used for ML training
-                if all_prs:
-                    out_dir = settings.data_output_dir
-                    os.makedirs(out_dir, exist_ok=True)
-                    safe_name = f"{record.workspace}_{record.repo_slug}".replace("/", "_")
-                    csv_path = os.path.join(out_dir, f"{safe_name}_prs.csv")
-                    df = pd.DataFrame(all_prs)
-                    df.to_csv(csv_path, index=False)
-                    logger.info("Saved %d PRs to %s", len(all_prs), csv_path)
-
-                store.update_pr_fetch_status(
-                    repo_id, "done", pr_count=len(all_prs)
-                )
-
-                # Auto-train the ML model on the freshly fetched data
-                self._auto_train(all_prs, settings)
-
-            except Exception as exc:
-                logger.exception("PR fetch failed for repo %d", repo_id)
-                store.update_pr_fetch_status(
-                    repo_id, "error", error=str(exc)
-                )
-
-        threading.Thread(target=_run, daemon=True).start()
+        threading.Thread(
+            target=self._fetch_prs_and_train, args=(repo_id, record), daemon=True
+        ).start()
         return {"status": "fetch_started", "repo_id": repo_id}
+
+    def _fetch_prs_and_train(self, repo_id: int, record) -> None:
+        """
+        Fetch historical PRs for a repo, save them for training, and
+        auto-train the ML risk model on the result. Runs synchronously in
+        whatever background thread calls it — safe to call directly from
+        the indexing pipeline (already off the request thread) or from its
+        own thread via start_fetch_repo_prs().
+        """
+        store = self._repo_store()
+        try:
+            import os
+            import pandas as pd
+            from bitbucket.client import BitbucketClient as BBC
+
+            settings = Settings.load()
+            client = BBC(settings)
+            all_prs = []
+
+            for state in ("MERGED", "DECLINED"):
+                logger.info("Fetching %s PRs for repo %d...", state, repo_id)
+                raw_prs = client.get_pull_requests(
+                    record.workspace, record.repo_slug,
+                    state=state, limit=500,
+                )
+                for pr_raw in raw_prs:
+                    try:
+                        pr_data = client.extract_pr_data(
+                            record.workspace, record.repo_slug, pr_raw
+                        )
+                        all_prs.append(pr_data)
+                    except Exception:
+                        logger.debug("Skipping PR #%s", pr_raw.get("id"))
+
+            # Save to CSV so it can be used for ML training
+            if all_prs:
+                out_dir = settings.data_output_dir
+                os.makedirs(out_dir, exist_ok=True)
+                safe_name = f"{record.workspace}_{record.repo_slug}".replace("/", "_")
+                csv_path = os.path.join(out_dir, f"{safe_name}_prs.csv")
+                df = pd.DataFrame(all_prs)
+                df.to_csv(csv_path, index=False)
+                logger.info("Saved %d PRs to %s", len(all_prs), csv_path)
+
+            store.update_pr_fetch_status(repo_id, "done", pr_count=len(all_prs))
+
+            # Auto-train the ML model on the freshly fetched data
+            self._auto_train(all_prs, settings)
+
+        except Exception as exc:
+            logger.exception("PR fetch failed for repo %d", repo_id)
+            store.update_pr_fetch_status(repo_id, "error", error=str(exc))
 
     def get_pr_diff(self, repo_id: int, pr_id: int) -> dict:
         store = self._repo_store()
