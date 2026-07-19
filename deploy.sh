@@ -60,7 +60,7 @@ reload_api() {
   if pm2 list | grep -q "$PM2_APP"; then
     pm2 reload "$APP_DIR/ecosystem.config.js" --update-env
   else
-    pm2 start "$APP_DIR/ecosystem.config.js"
+    pm2 start "$APP_DIR/ecosystem.config.js" --update-env
     pm2 save
   fi
   info "API running on port $API_PORT"

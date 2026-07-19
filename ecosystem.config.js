@@ -42,7 +42,7 @@ module.exports = {
       cwd: APP_DIR,
 
       env: {
-        PATH: VENV_BIN + ':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+        PATH: VENV_BIN + ':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:' + (process.env.PATH || ''),
         PYTHONUNBUFFERED: '1',
       },
       env_file: path.join(APP_DIR, '.env'),
