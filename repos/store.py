@@ -143,9 +143,13 @@ class RepoStore:
                     repo_id    INTEGER NOT NULL,
                     pr_id      INTEGER NOT NULL,
                     started_at TEXT    NOT NULL,
+                    pid        INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (repo_id, pr_id)
                 )
             """)
+            status_cols = {row[1] for row in conn.execute("PRAGMA table_info(pr_review_status)")}
+            if "pid" not in status_cols:
+                conn.execute("ALTER TABLE pr_review_status ADD COLUMN pid INTEGER NOT NULL DEFAULT 0")
 
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
@@ -458,26 +462,50 @@ class RepoStore:
 
     REVIEW_STALE_AFTER_MINUTES = 15
 
+    @staticmethod
+    def _claim_is_live(row) -> bool:
+        """A claim is live only while its owning worker process still exists
+        AND it isn't ancient. The PID check makes claims orphaned by a deploy
+        (pm2 reload kills workers mid-run, so mark_review_finished never
+        fires) go stale instantly instead of locking the PR for 15 minutes.
+        The age cap stays as a backstop for PID reuse."""
+        import os
+        age_minutes = (
+            datetime.utcnow() - datetime.fromisoformat(row["started_at"])
+        ).total_seconds() / 60
+        if age_minutes >= RepoStore.REVIEW_STALE_AFTER_MINUTES:
+            return False
+        pid = row["pid"] if "pid" in row.keys() else 0
+        if not pid:
+            return True  # legacy row without pid — age check only
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass  # process exists but owned by another user
+        return True
+
     def mark_review_started(self, repo_id: int, pr_id: int) -> bool:
         """Atomically claim the review slot for (repo_id, pr_id).
         Returns True if this call claimed it, False if one is already running.
-        A claim older than REVIEW_STALE_AFTER_MINUTES is treated as an
-        orphaned row from a crashed run and reclaimed."""
+        Dead-process or expired claims are reclaimed."""
+        import os
         now = datetime.utcnow()
         with self._lock, self._conn() as conn:
             row = conn.execute(
-                "SELECT started_at FROM pr_review_status WHERE repo_id=? AND pr_id=?",
+                "SELECT started_at, pid FROM pr_review_status WHERE repo_id=? AND pr_id=?",
                 (repo_id, pr_id),
             ).fetchone()
-            if row:
-                age_minutes = (now - datetime.fromisoformat(row["started_at"])).total_seconds() / 60
-                if age_minutes < self.REVIEW_STALE_AFTER_MINUTES:
-                    return False
+            if row and self._claim_is_live(row):
+                return False
             conn.execute(
-                """INSERT INTO pr_review_status (repo_id, pr_id, started_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(repo_id, pr_id) DO UPDATE SET started_at = excluded.started_at""",
-                (repo_id, pr_id, now.isoformat()),
+                """INSERT INTO pr_review_status (repo_id, pr_id, started_at, pid)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(repo_id, pr_id) DO UPDATE SET
+                       started_at = excluded.started_at,
+                       pid        = excluded.pid""",
+                (repo_id, pr_id, now.isoformat(), os.getpid()),
             )
             return True
 
@@ -490,16 +518,13 @@ class RepoStore:
 
     def get_review_status(self, repo_id: int, pr_id: int) -> str:
         """'running' if a review for this PR is currently being computed
-        (and not stale), else 'idle'."""
+        by a live worker, else 'idle'."""
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT started_at FROM pr_review_status WHERE repo_id=? AND pr_id=?",
+                "SELECT started_at, pid FROM pr_review_status WHERE repo_id=? AND pr_id=?",
                 (repo_id, pr_id),
             ).fetchone()
         if not row:
             return "idle"
-        age_minutes = (
-            datetime.utcnow() - datetime.fromisoformat(row["started_at"])
-        ).total_seconds() / 60
-        return "running" if age_minutes < self.REVIEW_STALE_AFTER_MINUTES else "idle"
+        return "running" if self._claim_is_live(row) else "idle"
 
