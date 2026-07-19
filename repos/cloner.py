@@ -319,6 +319,26 @@ class RepoCloner:
         except Exception as e:
             raise IOError(f"Cannot read {path}: {e}")
 
+    def get_head_commit(self, workspace: str, repo_slug: str,
+                        branch: str = "") -> Optional[dict]:
+        """Latest commit on the branch. Clones are depth=1, so this is the
+        only commit available — shown once per directory, not per file."""
+        dest = clone_dir(workspace, repo_slug, branch)
+        if not dest.exists():
+            dest = clone_dir(workspace, repo_slug)  # legacy fallback
+        if not dest.exists():
+            return None
+        try:
+            out = _run(
+                ["git", "log", "-1", "--format=%H%n%an%n%aI%n%s"],
+                cwd=dest,
+            )
+            sha, author, date, message = out.split("\n", 3)
+            return {"hash": sha[:7], "author": author,
+                   "date": date, "message": message}
+        except Exception:
+            return None
+
     def disk_usage_mb(self, workspace: str, repo_slug: str,
                       branch: str = "") -> float:
         dest = clone_dir(workspace, repo_slug, branch)

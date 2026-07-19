@@ -104,6 +104,12 @@ export async function readSourceFile(repoId, path, branch = "") {
   return apiRequest("GET", `/repos/${repoId}/source/file?${params}`);
 }
 
+export async function getSourceHeadCommit(repoId, branch = "") {
+  const params = new URLSearchParams();
+  if (branch) params.set("branch", branch);
+  return apiRequest("GET", `/repos/${repoId}/source/commit?${params}`);
+}
+
 // ─── Bitbucket discovery ───────────────────────────
 export async function listBitbucketRepos() {
   return apiRequest("GET", "/bitbucket/repos");

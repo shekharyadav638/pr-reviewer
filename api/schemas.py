@@ -231,6 +231,13 @@ class SourceFileResponse(BaseModel):
     content: str
 
 
+class HeadCommit(BaseModel):
+    hash: str
+    author: str
+    date: str
+    message: str
+
+
 class PostReviewCommentsRequest(BaseModel):
     llm_detected_issues: list[dict] = []
     llm_security_concerns: list[dict] = []

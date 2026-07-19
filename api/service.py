@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 from analysis.analyzer import AnalysisReport, PRAnalyzer
 from api.schemas import (
@@ -19,6 +20,28 @@ from config.settings import Settings
 from hybrid.report_builder import HybridReport, HybridReportBuilder
 
 logger = logging.getLogger(__name__)
+
+# Only long-lived environment branches get cloned/indexed — feature/ticket
+# branches are always cut from one of these, so indexing them separately is
+# pure duplication and burns disk/embedding cost for no benefit.
+MAIN_BRANCH_NAMES = {
+    "master", "main", "dev", "develop", "stage", "staging",
+    "production", "prod", "release", "qa", "uat",
+}
+# Ticket branches: "DF-754-...", or namespaced "DF-754/...", "feature/...",
+# "hotfix/...", "fix/...", "bugfix/...", "chore/...", "task/..."
+_TICKET_ID_RE = re.compile(r"^[a-z]{2,10}-\d+", re.IGNORECASE)
+_WORKFLOW_PREFIX_RE = re.compile(
+    r"^(feature|feat|fix|hotfix|bugfix|chore|task)/", re.IGNORECASE
+)
+
+
+def _is_main_branch(name: str) -> bool:
+    """True only for long-lived environment branches, never ticket/feature work."""
+    n = name.strip().lower()
+    if "/" in n or _WORKFLOW_PREFIX_RE.match(n) or _TICKET_ID_RE.match(n):
+        return False
+    return n in MAIN_BRANCH_NAMES
 
 
 def _parse_json_list(value: str) -> list:
@@ -205,13 +228,14 @@ class AnalysisService:
 
     def start_index_repo(self, repo_id: int) -> dict:
         """
-        Full pipeline (background) for ALL branches:
-          For each branch fetched from Bitbucket:
+        Full pipeline (background) for the main branches only (see MAIN_BRANCHES):
+          For each matching branch fetched from Bitbucket:
             1. Sparse-shallow clone
             2. Build AST graph
             3. Build ChromaDB vector index
         Progress is reported as a fraction of total branches completed.
-        The `branch` parameter is now ignored — all branches are always indexed.
+        Feature/ticket branches are skipped — they're checked out from a main
+        branch anyway, so indexing them separately just duplicates content.
         """
         import threading
         store = self._repo_store()
@@ -235,10 +259,11 @@ class AnalysisService:
             settings = Settings.load()
             cloner   = self._make_cloner()
 
-            # ── Fetch branch list from Bitbucket ───────────────────────
+            # ── Fetch branch list from Bitbucket, keep only main branches ──
             try:
                 bb = self._make_bb_client()
-                branches = bb.get_branches(record.workspace, record.repo_slug)
+                all_branches = bb.get_branches(record.workspace, record.repo_slug)
+                branches = [b for b in all_branches if _is_main_branch(b)]
             except Exception as exc:
                 logger.warning("Could not fetch branches from Bitbucket (%s) — "
                                "falling back to default branch", exc)
@@ -439,6 +464,15 @@ class AnalysisService:
         cloner = self._make_cloner()
         content = cloner.read_file(record.workspace, record.repo_slug, path, branch)
         return {"path": path, "content": content}
+
+    def get_source_head_commit(self, repo_id: int, branch: str = "") -> dict | None:
+        store = self._repo_store()
+        record = store.get_repo(repo_id)
+        if not record:
+            raise ValueError(f"Repo {repo_id} not found")
+        branch = self._resolve_branch(record, branch)
+        cloner = self._make_cloner()
+        return cloner.get_head_commit(record.workspace, record.repo_slug, branch)
 
     def _resolve_branch(self, record, branch: str) -> str:
         """Pick the branch to serve source from. Uses the first indexed branch as default."""

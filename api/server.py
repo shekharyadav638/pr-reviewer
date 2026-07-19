@@ -12,6 +12,7 @@ from api.schemas import (
     AnalyzeResponse,
     ErrorResponse,
     FeedbackRequest,
+    HeadCommit,
     HybridAnalyzeResponse,
     PRListItem,
     RepoResponse,
@@ -266,6 +267,19 @@ def browse_source(repo_id: int, path: str = "", branch: str = ""):
     """Browse the source tree of a cloned repo at the given path and branch."""
     try:
         return service.browse_source(repo_id, path, branch)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get(
+    "/repos/{repo_id}/source/commit",
+    response_model=HeadCommit | None,
+    responses={404: {"model": ErrorResponse}},
+)
+def get_source_head_commit(repo_id: int, branch: str = ""):
+    """Latest commit on the branch (single commit — clones are shallow)."""
+    try:
+        return service.get_source_head_commit(repo_id, branch)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

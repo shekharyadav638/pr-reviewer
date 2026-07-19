@@ -1,17 +1,19 @@
-import { useEffect, useState, useCallback } from "react";
-import { useLocation } from "react-router-dom";
-import { listBranches, browseSource, readSourceFile, syncRepo, getRepo } from "../api/client";
+import { Icon } from '@iconify/react';
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { Link, useLocation } from "react-router-dom";
+import { listBranches, browseSource, readSourceFile, syncRepo, getRepo, getSourceHeadCommit } from "../api/client";
+
+const CODE_EXTENSIONS = new Set(["py", "js", "jsx", "ts", "tsx", "go", "java", "sh", "rb", "php"]);
 
 function FileIcon({ type, name }) {
-  if (type === "dir") return <span style={{ marginRight: 6 }}>📁</span>;
+  if (type === "dir") return <Icon icon="lucide:folder" className="text-brand-500 text-[16px] shrink-0" />;
   const ext = (name || "").split(".").pop().toLowerCase();
-  const icons = {
-    py: "🐍", js: "🟨", jsx: "⚛️", ts: "🔷", tsx: "⚛️",
-    json: "📋", md: "📝", yml: "⚙️", yaml: "⚙️",
-    css: "🎨", html: "🌐", go: "🐹", java: "☕",
-    sh: "⚙️", env: "⚙️",
-  };
-  return <span style={{ marginRight: 6 }}>{icons[ext] || "📄"}</span>;
+  const icon = ext === "json" ? "lucide:file-json"
+    : ext === "md" ? "lucide:file-text"
+    : (ext === "yml" || ext === "yaml") ? "lucide:file-cog"
+    : CODE_EXTENSIONS.has(ext) ? "lucide:file-code"
+    : "lucide:file";
+  return <Icon icon={icon} className="text-slate-400 text-[16px] shrink-0" />;
 }
 
 function formatSize(bytes) {
@@ -19,6 +21,19 @@ function formatSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function timeAgo(dateString) {
+  if (!dateString) return "";
+  const seconds = Math.floor((new Date() - new Date(dateString)) / 1000);
+  if (seconds < 60) return "just now";
+  const mins = Math.floor(seconds / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(dateString).toLocaleDateString();
 }
 
 export default function SourceBrowser({ repo: propRepo }) {
@@ -31,7 +46,9 @@ export default function SourceBrowser({ repo: propRepo }) {
   const [branch, setBranch]       = useState("");
   const [path, setPath]           = useState("");
   const [entries, setEntries]     = useState([]);
+  const [headCommit, setHeadCommit] = useState(null);
   const [file, setFile]           = useState(null);
+  const [filter, setFilter]       = useState("");
   const [loading, setLoading]     = useState(false);
   const [syncing, setSyncing]     = useState(false);
   const [error, setError]         = useState("");
@@ -79,10 +96,8 @@ export default function SourceBrowser({ repo: propRepo }) {
       .then(data => { setEntries(Array.isArray(data) ? data : []); setPath(p); })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
+    getSourceHeadCommit(repoId, activeBranch).then(setHeadCommit).catch(() => setHeadCommit(null));
   }, [repoId, branch]);
-
-  // Keep backward-compat alias used in JSX below
-  const browse = browseDir;
 
   function openEntry(entry) {
     if (entry.type === "dir") {
@@ -102,6 +117,7 @@ export default function SourceBrowser({ repo: propRepo }) {
     setBranch(newBranch);
     setPath("");
     setFile(null);
+    setFilter("");
     browseDir("", newBranch);
   }
 
@@ -127,162 +143,226 @@ export default function SourceBrowser({ repo: propRepo }) {
     ];
   };
 
+  const visibleEntries = useMemo(() => {
+    const term = filter.toLowerCase();
+    return [...entries]
+      .filter(e => !term || e.name.toLowerCase().includes(term))
+      .sort((a, b) => {
+        if (a.type === b.type) return a.name.localeCompare(b.name);
+        return a.type === "dir" ? -1 : 1;
+      });
+  }, [entries, filter]);
+
+  const indexedCount = repo?.indexed_branches?.length || 0;
+  const totalBranchCount = repo?.branches?.length || branches.length;
+
   if (!repo) {
     return (
-      <div style={{ padding: 40, color: "var(--text-muted)" }}>
+      <div className="p-10 text-slate-500 text-sm">
         Select a repository from the sidebar.
       </div>
     );
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      {/* Toolbar */}
-      <div style={{
-        display: "flex", alignItems: "center", gap: 12,
-        padding: "10px 20px", borderBottom: "1px solid var(--border)",
-        background: "var(--surface)", flexShrink: 0,
-      }}>
-        <span style={{ fontWeight: 600, fontSize: "0.95rem", color: "var(--text)" }}>
-          {repo.display_name || repo.repo_slug}
-        </span>
-
-        {/* Branch selector */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>⎇</span>
-          <select
-            value={branch}
-            onChange={e => handleBranchChange(e.target.value)}
-            style={{
-              background: "var(--surface-2)", color: "var(--text)",
-              border: "1px solid var(--border)", borderRadius: 6,
-              padding: "4px 8px", fontSize: "0.83rem", cursor: "pointer",
-              outline: "none",
-            }}
-          >
-            {branches.map(b => <option key={b} value={b}>{b}</option>)}
-          </select>
+    <div className="flex flex-col h-full min-h-0 bg-[#f8fafc]">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 px-6 py-4 flex-shrink-0 z-20 shadow-sm">
+        <div className="text-[13px] text-slate-500 mb-2 flex items-center gap-2">
+          <Link to={`/pr-list?repoId=${repo.id}`} className="hover:text-brand-600 flex items-center gap-1 transition-colors">
+            <Icon icon="lucide:arrow-left" className="text-[14px]" />
+            Back to Pull Requests
+          </Link>
+          <span className="text-slate-300">/</span>
+          <Icon icon="mdi:bitbucket" className="text-[#0052CC] text-[14px]" />
+          <span>{repo.workspace}</span>
+          <span className="text-slate-300">/</span>
+          <span className="font-medium text-slate-700">{repo.repo_slug}</span>
         </div>
 
-        <button
-          onClick={handleSync}
-          disabled={syncing}
-          style={{
-            background: syncing ? "var(--surface-2)" : "var(--green-bg)",
-            color: "var(--green)", border: "1px solid var(--green-border)",
-            borderRadius: 6, padding: "4px 12px", fontSize: "0.8rem",
-            fontWeight: 600, cursor: syncing ? "default" : "pointer",
-          }}
-        >
-          {syncing ? "Syncing…" : "↻ Sync"}
-        </button>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h1 className="text-xl font-bold text-slate-900 tracking-tight">Source</h1>
 
-        {error && (
-          <span style={{ color: "var(--red)", fontSize: "0.8rem", flex: 1 }}>{error}</span>
-        )}
-      </div>
-
-      {/* Breadcrumb */}
-      <div style={{
-        padding: "7px 20px", borderBottom: "1px solid var(--border)",
-        background: "var(--surface-2)", fontSize: "0.82rem",
-        color: "var(--text-muted)", flexShrink: 0,
-      }}>
-        {crumbs().map((c, i) => (
-          <span key={c.path}>
-            {i > 0 && <span style={{ margin: "0 5px", color: "var(--border-strong)" }}>/</span>}
-            <button
-              onClick={() => { setFile(null); browseDir(c.path); }}
-              style={{
-                background: "none", border: "none", padding: 0,
-                color: i === crumbs().length - 1 ? "var(--text)" : "var(--blue)",
-                cursor: "pointer", fontSize: "0.82rem", fontWeight: i === 0 ? 600 : 400,
-              }}
-            >{c.label}</button>
-          </span>
-        ))}
-      </div>
-
-      {/* Content */}
-      <div style={{ flex: 1, overflow: "auto", background: "var(--surface)" }}>
-        {loading && (
-          <div style={{ padding: 24, color: "var(--text-muted)" }}>Loading…</div>
-        )}
-
-        {!loading && !file && (
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <tbody>
-              {entries.length === 0 && (
-                <tr><td style={{ padding: "20px", color: "var(--text-muted)" }}>Empty directory</td></tr>
-              )}
-              {[...entries]
-                .sort((a, b) => {
-                  if (a.type === b.type) return a.name.localeCompare(b.name);
-                  return a.type === "dir" ? -1 : 1;
-                })
-                .map(entry => (
-                  <tr
-                    key={entry.path}
-                    onClick={() => openEntry(entry)}
-                    style={{ cursor: "pointer", borderBottom: "1px solid var(--border)" }}
-                    onMouseEnter={e => e.currentTarget.style.background = "var(--surface-2)"}
-                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}
-                  >
-                    <td style={{
-                      padding: "8px 20px",
-                      color: entry.type === "dir" ? "var(--blue)" : "var(--text)",
-                      fontSize: "0.875rem", width: "60%",
-                    }}>
-                      <FileIcon type={entry.type} name={entry.name} />
-                      {entry.name}
-                    </td>
-                    <td style={{
-                      padding: "8px 20px", color: "var(--text-muted)",
-                      fontSize: "0.8rem", textAlign: "right",
-                    }}>
-                      {entry.type === "file" && formatSize(entry.size)}
-                    </td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        )}
-
-        {!loading && file && (
-          <div>
-            <div style={{
-              padding: "8px 20px", borderBottom: "1px solid var(--border)",
-              background: "var(--surface-2)", fontSize: "0.82rem",
-              color: "var(--text-secondary)", display: "flex", justifyContent: "space-between",
-              alignItems: "center",
-            }}>
-              <span style={{ fontFamily: "monospace" }}>{file.path}</span>
-              <button onClick={() => setFile(null)} style={{
-                background: "none", border: "none", color: "var(--blue)",
-                cursor: "pointer", fontSize: "0.82rem",
-              }}>← Back</button>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
+              <Icon icon="lucide:git-branch" className="text-slate-400 text-[14px]" />
+              <select
+                value={branch}
+                onChange={e => handleBranchChange(e.target.value)}
+                className="bg-transparent text-[13px] font-medium text-slate-700 outline-none cursor-pointer"
+              >
+                {branches.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
             </div>
-            <pre style={{
-              margin: 0, padding: "16px 0",
-              color: "var(--text)", fontSize: "0.82rem", lineHeight: 1.65,
-              fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-              overflowX: "auto",
-            }}>
-              {file.content.split("\n").map((line, i) => (
-                <div key={i} style={{ display: "flex" }}>
-                  <span style={{
-                    color: "var(--text-muted)", userSelect: "none",
-                    minWidth: 48, paddingRight: 16, textAlign: "right",
-                    fontSize: "0.75rem", flexShrink: 0,
-                    borderRight: "1px solid var(--border)",
-                    paddingLeft: 8,
-                  }}>{i + 1}</span>
-                  <span style={{ paddingLeft: 16 }}>{line}</span>
-                </div>
-              ))}
-            </pre>
+
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              className="flex items-center gap-1.5 text-[13px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-slate-900 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+            >
+              <Icon icon="lucide:refresh-cw" className={`text-[13px] ${syncing ? 'animate-spin' : ''}`} />
+              {syncing ? 'Syncing…' : 'Sync'}
+            </button>
           </div>
-        )}
+        </div>
+
+        {error && <p className="text-red-500 text-[13px] mt-2">{error}</p>}
+      </header>
+
+      <div className="flex flex-1 min-h-0">
+        {/* Main content */}
+        <div className="flex-1 flex flex-col min-w-0 min-h-0">
+          {/* Toolbar: breadcrumb path + filter */}
+          <div className="flex items-center justify-between gap-4 px-6 py-3 border-b border-slate-200 bg-white flex-shrink-0">
+            <div className="text-[13px] flex items-center flex-wrap min-w-0">
+              {crumbs().map((c, i, arr) => (
+                <span key={c.path} className="flex items-center min-w-0">
+                  {i > 0 && <span className="mx-1.5 text-slate-300">/</span>}
+                  <button
+                    onClick={() => { setFile(null); browseDir(c.path); }}
+                    className={`truncate hover:text-brand-600 transition-colors ${
+                      i === arr.length - 1 ? 'text-slate-900 font-semibold' : 'text-brand-600 font-medium'
+                    }`}
+                  >{c.label}</button>
+                </span>
+              ))}
+            </div>
+
+            {!file && (
+              <div className="relative shrink-0">
+                <Icon icon="lucide:search" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-[13px]" />
+                <input
+                  type="text"
+                  value={filter}
+                  onChange={e => setFilter(e.target.value)}
+                  placeholder="Filter files"
+                  className="pl-8 pr-3 py-1.5 w-48 bg-slate-50 border border-slate-200 focus:border-brand-400 rounded-lg text-[13px] outline-none transition-colors"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Latest commit banner */}
+          {!file && headCommit && (
+            <div className="flex items-center gap-2 px-6 py-2.5 border-b border-slate-200 bg-slate-50 text-[13px] text-slate-600 flex-shrink-0">
+              <Icon icon="lucide:git-commit-horizontal" className="text-slate-400 text-[14px] shrink-0" />
+              <span className="font-medium text-slate-800 truncate">{headCommit.message}</span>
+              <span className="text-slate-400">·</span>
+              <span className="truncate">{headCommit.author}</span>
+              <span className="text-slate-400">·</span>
+              <span className="font-mono text-[12px] text-slate-500">{headCommit.hash}</span>
+              <span className="text-slate-400 ml-auto shrink-0">{timeAgo(headCommit.date)}</span>
+            </div>
+          )}
+
+          {/* Content */}
+          <div className="flex-1 overflow-auto bg-white">
+            {loading && (
+              <div className="p-6 text-slate-500 text-sm">Loading…</div>
+            )}
+
+            {!loading && !file && (
+              <table className="w-full border-collapse text-left">
+                <thead>
+                  <tr className="border-b border-slate-200 text-[12px] uppercase tracking-wider text-slate-400">
+                    <th className="px-6 py-2.5 font-semibold">Name</th>
+                    <th className="px-6 py-2.5 font-semibold text-right w-32">Size</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleEntries.length === 0 && (
+                    <tr><td colSpan={2} className="px-6 py-8 text-slate-400 text-sm">Empty directory</td></tr>
+                  )}
+                  {visibleEntries.map(entry => (
+                    <tr
+                      key={entry.path}
+                      onClick={() => openEntry(entry)}
+                      className="cursor-pointer border-b border-slate-100 hover:bg-slate-50 transition-colors"
+                    >
+                      <td className="px-6 py-2.5 text-[14px]">
+                        <span className="flex items-center gap-2.5">
+                          <FileIcon type={entry.type} name={entry.name} />
+                          <span className={entry.type === "dir" ? "text-brand-700 font-medium" : "text-slate-700"}>
+                            {entry.name}
+                          </span>
+                        </span>
+                      </td>
+                      <td className="px-6 py-2.5 text-[13px] text-slate-400 text-right font-mono">
+                        {entry.type === "file" && formatSize(entry.size)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {!loading && file && (
+              <div>
+                <div className="px-6 py-2.5 border-b border-slate-200 bg-slate-50 text-[13px] text-slate-500 flex justify-between items-center">
+                  <span className="font-mono">{file.path}</span>
+                  <button onClick={() => setFile(null)} className="flex items-center gap-1 text-brand-600 hover:text-brand-700 font-medium">
+                    <Icon icon="lucide:arrow-left" className="text-[13px]" /> Back
+                  </button>
+                </div>
+                <pre className="m-0 py-4 text-slate-800 text-[13px] leading-relaxed font-mono overflow-x-auto">
+                  {file.content.split("\n").map((line, i) => (
+                    <div key={i} className="flex">
+                      <span className="text-slate-400 select-none min-w-[48px] pr-4 pl-2 text-right text-[12px] shrink-0 border-r border-slate-200">
+                        {i + 1}
+                      </span>
+                      <span className="pl-4 whitespace-pre">{line}</span>
+                    </div>
+                  ))}
+                </pre>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Repository details panel */}
+        <aside className="w-72 border-l border-slate-200 bg-white p-5 overflow-y-auto flex-shrink-0 hidden lg:block">
+          <h3 className="text-[13px] font-semibold text-slate-900 mb-4 flex items-center gap-1.5">
+            <Icon icon="lucide:info" className="text-slate-400 text-[14px]" />
+            Repository details
+          </h3>
+          <dl className="space-y-4 text-[13px]">
+            <div>
+              <dt className="text-slate-400 mb-0.5">Last synced</dt>
+              <dd className="text-slate-800 font-medium">{timeAgo(repo.indexed_at || repo.cloned_at) || '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-slate-400 mb-0.5">Branches indexed</dt>
+              <dd className="text-slate-800 font-medium">{indexedCount} / {totalBranchCount || indexedCount}</dd>
+            </div>
+            <div>
+              <dt className="text-slate-400 mb-0.5">Open pull requests</dt>
+              <dd className="text-slate-800 font-medium">{repo.pr_count ?? 0}</dd>
+            </div>
+            <div>
+              <dt className="text-slate-400 mb-0.5">Clone size</dt>
+              <dd className="text-slate-800 font-medium">{repo.clone_size_mb ? `${repo.clone_size_mb} MB` : '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-slate-400 mb-0.5">Index status</dt>
+              <dd>
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[12px] font-medium ${
+                  repo.index_status === 'indexed' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'
+                }`}>
+                  {repo.index_status}
+                </span>
+              </dd>
+            </div>
+          </dl>
+
+          <a
+            href={`https://bitbucket.org/${repo.workspace}/${repo.repo_slug}/src/${branch}/`}
+            target="_blank" rel="noreferrer"
+            className="mt-6 flex items-center justify-center gap-2 w-full text-[13px] font-medium text-slate-600 bg-slate-50 border border-slate-200 hover:bg-slate-100 hover:text-slate-900 px-3 py-2 rounded-lg transition-colors"
+          >
+            <Icon icon="mdi:bitbucket" className="text-[#0052CC] text-[14px]" />
+            View on Bitbucket
+          </a>
+        </aside>
       </div>
     </div>
   );
