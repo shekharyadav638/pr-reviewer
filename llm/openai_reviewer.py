@@ -201,9 +201,12 @@ class OpenAIReviewer:
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
-            logger.warning("Failed to parse LLM JSON response, "
-                           "returning raw as summary")
-            return LLMReviewResult(summary=raw[:2000])
+            data = OpenAIReviewer._parse_json_lenient(text)
+            if data is None:
+                logger.warning("Failed to parse LLM JSON response, "
+                               "returning raw as summary")
+                return LLMReviewResult(summary=raw[:2000])
+            logger.info("Recovered LLM JSON via lenient parse")
 
         return LLMReviewResult(
             issues=data.get("issues", []),
@@ -213,6 +216,56 @@ class OpenAIReviewer:
             suggested_improvements=data.get("suggested_improvements", []),
             summary=data.get("summary", ""),
         )
+
+    @staticmethod
+    def _parse_json_lenient(text: str) -> dict | None:
+        """Recover JSON from a response with prose around it or a tail cut
+        off by max_tokens. Trims to the last complete object/array and closes
+        any brackets left open — a truncated final finding is dropped, the
+        rest survive."""
+        start = text.find("{")
+        if start == -1:
+            return None
+        text = text[start:]
+
+        end = text.rfind("}")
+        if end != -1:
+            try:
+                return json.loads(text[:end + 1])
+            except json.JSONDecodeError:
+                pass
+
+        stack: list[str] = []
+        in_str = esc = False
+        best: tuple[int, str] | None = None
+        for i, ch in enumerate(text):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch in "{[":
+                stack.append(ch)
+            elif ch in "}]":
+                if not stack:
+                    return None
+                stack.pop()
+                best = (i + 1, "".join(
+                    "}" if c == "{" else "]" for c in reversed(stack)
+                ))
+        if best is None:
+            return None
+        cut, closers = best
+        candidate = text[:cut].rstrip().rstrip(",") + closers
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
 
     @staticmethod
     def _chunk_diff(diff_text: str) -> list[str]:

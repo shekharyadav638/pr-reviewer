@@ -1041,9 +1041,25 @@ class AnalysisService:
                 return
 
             # Label the data using the same heuristics as the manual pipeline
+            import os
             import pandas as pd
             labeler = Labeler(settings)
             df = labeler.generate_labels(pd.DataFrame(all_prs))
+
+            # Merge into the cumulative pr_dataset.csv and train on ALL repos'
+            # PRs, not just this one's — the model artifacts are shared, so
+            # training on only the latest repo would overwrite what previous
+            # repos taught it. This file is also what hotspot detection and
+            # /retrain load, so writing it here makes indexing self-contained.
+            dataset_path = os.path.join(settings.data_output_dir, "pr_dataset.csv")
+            if os.path.exists(dataset_path):
+                existing = pd.read_csv(dataset_path)
+                df = pd.concat([existing, df], ignore_index=True)
+                if {"repo", "pr_id"} <= set(df.columns):
+                    df = df.drop_duplicates(subset=["repo", "pr_id"], keep="last")
+            os.makedirs(settings.data_output_dir, exist_ok=True)
+            df.to_csv(dataset_path, index=False)
+            logger.info("Cumulative dataset: %d PRs at %s", len(df), dataset_path)
 
             y = df["needs_major_changes"].values.astype(int)
             if len(np.unique(y)) < 2:
