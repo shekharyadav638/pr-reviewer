@@ -383,6 +383,17 @@ class RepoStore:
             for r in rows
         ]
 
+    def reset_indexed_branches(self, repo_id: int, branches: list[str]) -> None:
+        """Overwrite indexed_branches entirely — used when pruning branches
+        that no longer belong (e.g. ticket branches indexed before the
+        main-branch filter existed)."""
+        import json
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "UPDATE repos SET indexed_branches=? WHERE id=?",
+                (json.dumps(branches), repo_id),
+            )
+
     def mark_branch_indexed(self, repo_id: int, branch: str) -> None:
         """Add branch to the indexed_branches JSON list."""
         import json

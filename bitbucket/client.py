@@ -195,8 +195,10 @@ class BitbucketClient:
         }
 
     def get_branches(self, workspace: str, repo_slug: str,
-                     max_branches: int = 200) -> list[str]:
-        """Return all branch names for a repository."""
+                     max_branches: int = 10_000) -> list[str]:
+        """Return all branch names for a repository, following pagination
+        to the end — repos with hundreds of ticket branches (seen: 550+)
+        must not have their main branch silently cut off by a low page cap."""
         url = (f"{self.base_url}/repositories/{workspace}/{repo_slug}"
                f"/refs/branches")
         items = self._get_paginated(url, params={"pagelen": 100},

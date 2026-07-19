@@ -207,7 +207,6 @@ class AnalysisService:
         return self._repo_to_response(record)
 
     def delete_repo(self, repo_id: int) -> dict:
-        import shutil
         from pathlib import Path
 
         store = self._repo_store()
@@ -215,16 +214,9 @@ class AnalysisService:
         if not record:
             raise ValueError(f"Repo {repo_id} not found")
 
-        from repos.cloner import RepoCloner
-        cloner = self._make_cloner()
-
-        # 1. Delete sparse clone from disk
-        cloner.delete_clone(record.workspace, record.repo_slug)
-
-        # 2. Delete ChromaDB vector index
-        chroma_dir = Path("data/chroma") / f"{record.workspace}_{record.repo_slug}"
-        if chroma_dir.exists():
-            shutil.rmtree(chroma_dir)
+        # 1 & 2. Delete every clone + ChromaDB dir for this repo, across
+        # every branch ever indexed (not just the legacy no-branch path).
+        self._purge_branch_data(record.workspace, record.repo_slug, keep_branches=set())
 
         # 3. Delete training CSV
         settings = Settings.load()
@@ -299,6 +291,12 @@ class AnalysisService:
                     store.update_default_branch(repo_id, fallback)
                 branches = [fallback]
 
+            # Prune any previously cloned/indexed branch that's no longer in
+            # the filtered set — cleans up ticket-branch clutter left behind
+            # by runs from before the main-branch filter existed.
+            self._purge_branch_data(record.workspace, record.repo_slug,
+                                    keep_branches=set(branches))
+            store.reset_indexed_branches(repo_id, [])
             store.update_branches(repo_id, branches)
             total = len(branches)
             logger.info("Indexing %d branches for repo %d: %s",
@@ -531,6 +529,32 @@ class AnalysisService:
     def _make_bb_client(self):
         from bitbucket.client import BitbucketClient as BBC
         return BBC(Settings.load())
+
+    def _purge_branch_data(self, workspace: str, repo_slug: str,
+                           keep_branches: set[str]) -> None:
+        """Delete every on-disk clone/chroma dir for this repo whose branch
+        isn't in `keep_branches` (pass an empty set to wipe everything).
+        Cleans up data left behind by ticket branches that got cloned/indexed
+        before the main-branch filter existed."""
+        import shutil
+        from pathlib import Path
+
+        prefix = f"{workspace}_{repo_slug}"
+        for base in (Path("data/clones"), Path("data/chroma")):
+            if not base.exists():
+                continue
+            for entry in base.iterdir():
+                if not entry.is_dir():
+                    continue
+                if entry.name == prefix:
+                    branch = ""  # legacy no-branch path
+                elif entry.name.startswith(prefix + "__"):
+                    branch = entry.name[len(prefix) + 2:]
+                else:
+                    continue
+                if branch not in keep_branches:
+                    logger.info("Pruning stale indexed data: %s", entry)
+                    shutil.rmtree(entry, ignore_errors=True)
 
     # ------------------------------------------------------------------ #
     # Bitbucket webhook registration                                        #
