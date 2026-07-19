@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,15 @@ security vulnerabilities, code smells, and optimization opportunities.\
 # request (e.g. 8344), which a 60k-char chunk (~14k tokens) blows past with
 # a 402. Set LLM_CHUNK_CHARS=24000 to fit under such caps without code edits.
 CHUNK_SIZE = int(os.getenv("LLM_CHUNK_CHARS", "60000"))
+
+# OpenRouter's free-tier prompt-token cap isn't fixed — it moves with the
+# account's remaining free quota (observed dropping from 8344 to 7035 within
+# the same hour). A static CHUNK_SIZE inevitably goes stale, so on a 402 we
+# read the live cap straight out of the error and re-split to fit under it,
+# rather than asking the user to keep re-guessing a number.
+_TOKEN_LIMIT_RE = re.compile(r"limit exceeded:\s*\d+\s*>\s*(\d+)")
+_CHARS_PER_TOKEN = 3  # conservative — code/diff text runs closer to 3 than 4
+MAX_SPLIT_DEPTH = 6
 
 
 @dataclass
@@ -151,7 +161,8 @@ class OpenAIReviewer:
     def _review_single(self, diff_chunk: str, pr_title: str,
                        pr_description: str,
                        context: str = "",
-                       extra_context: str = "") -> LLMReviewResult:
+                       extra_context: str = "",
+                       _depth: int = 0) -> LLMReviewResult:
         user_content = self._build_user_prompt(
             diff_chunk, pr_title, pr_description, context, extra_context
         )
@@ -168,11 +179,41 @@ class OpenAIReviewer:
             )
             raw = response.choices[0].message.content.strip()
             return self._parse_response(raw)
-        except Exception:
+        except Exception as exc:
+            live_cap = self._extract_token_limit(exc)
+            if live_cap and _depth < MAX_SPLIT_DEPTH and len(diff_chunk) > 500:
+                # Leave headroom for the system prompt + title/description,
+                # which share the same token budget as the diff.
+                safe_chars = max(500, live_cap * _CHARS_PER_TOKEN - 1000)
+                if safe_chars < len(diff_chunk):
+                    pieces = [diff_chunk[i:i + safe_chars]
+                             for i in range(0, len(diff_chunk), safe_chars)]
+                    logger.info(
+                        "Provider prompt cap is now %d tokens — re-splitting "
+                        "a %d-char chunk into %d smaller pieces",
+                        live_cap, len(diff_chunk), len(pieces),
+                    )
+                    results = [
+                        self._review_single(
+                            piece, pr_title, pr_description,
+                            context=context,
+                            extra_context=extra_context if i == 0 else "",
+                            _depth=_depth + 1,
+                        )
+                        for i, piece in enumerate(pieces)
+                    ]
+                    return self._merge_results(results)
             logger.exception("OpenAI API call failed")
             return LLMReviewResult(
                 summary="LLM analysis failed due to an API error."
             )
+
+    @staticmethod
+    def _extract_token_limit(exc: Exception) -> int | None:
+        """Pull the provider's current prompt-token cap out of a 402 error
+        message like 'Prompt tokens limit exceeded: 14684 > 8344'."""
+        m = _TOKEN_LIMIT_RE.search(str(exc))
+        return int(m.group(1)) if m else None
 
     @staticmethod
     def _build_user_prompt(diff: str, title: str, description: str,
