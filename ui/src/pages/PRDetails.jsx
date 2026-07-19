@@ -1,7 +1,7 @@
 import { Icon } from '@iconify/react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { getRepo, getRepoPRs, analyzeHybrid, postReviewComments, getPRReview, savePRReview, getPRDiff, postPRComment } from '../api/client';
+import { getRepo, getRepoPRs, analyzeHybrid, postReviewComments, getPRReview, getPRReviewStatus, getPRDiff, postPRComment } from '../api/client';
 import Spinner from '../components/Spinner';
 import { parseDiff, FileDiff } from '../components/DiffViewer';
 import FileTree from '../components/FileTree';
@@ -50,10 +50,46 @@ export default function PRDetails() {
   
   const [activeFile, setActiveFile] = useState(null);
   const fileRefs = useRef({});
+  const pollRef = useRef(null);
+
+  function stopPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
+
+  // Resume showing "Analyzing..." after a navigation away instead of
+  // re-triggering a duplicate run — polls until the server-side review
+  // (started by us or another tab) finishes and gets cached.
+  function startPolling() {
+    if (pollRef.current) return;
+    pollRef.current = setInterval(async () => {
+      try {
+        const cached = await getPRReview(repoId, prId);
+        if (cached) {
+          stopPolling();
+          setReview(cached);
+          setReviewing(false);
+          return;
+        }
+        const { status } = await getPRReviewStatus(repoId, prId);
+        if (status === 'idle') {
+          // Finished (or failed) with nothing cached — stop waiting.
+          stopPolling();
+          setReviewing(false);
+        }
+      } catch {
+        // Network hiccup — keep trying on the next tick.
+      }
+    }, 4000);
+  }
+
+  useEffect(() => stopPolling, []);
 
   useEffect(() => {
     if (!repoId || !prId) return;
-    
+
     async function loadData() {
       setLoading(true);
       try {
@@ -63,12 +99,12 @@ export default function PRDetails() {
         // Fetch PRs to find ours
         let prsData = await getRepoPRs(repoId, "OPEN").catch(() => []);
         let targetPr = prsData.find(p => p.pr_id === prId);
-        
+
         if (!targetPr) {
           prsData = await getRepoPRs(repoId, "MERGED").catch(() => []);
           targetPr = prsData.find(p => p.pr_id === prId);
         }
-        
+
         if (!targetPr) {
           prsData = await getRepoPRs(repoId, "DECLINED").catch(() => []);
           targetPr = prsData.find(p => p.pr_id === prId);
@@ -78,7 +114,18 @@ export default function PRDetails() {
 
         // Load cached review from backend (shared across all users)
         const cached = await getPRReview(repoId, prId).catch(() => null);
-        if (cached) setReview(cached);
+        if (cached) {
+          setReview(cached);
+        } else {
+          // No cached result — check whether a review is already running
+          // (e.g. we started one, then navigated away and came back).
+          const { status } = await getPRReviewStatus(repoId, prId).catch(() => ({ status: 'idle' }));
+          if (status === 'running') {
+            setReviewing(true);
+            setTab('review');
+            startPolling();
+          }
+        }
       } catch (err) {
         console.error("Failed to load PR details:", err);
       } finally {
@@ -102,14 +149,20 @@ export default function PRDetails() {
     setReviewing(true);
     setTab('review');
     try {
+      // Server persists the result itself once the analysis finishes, so it's
+      // cached even if we navigate away before this fetch resolves.
       const data = await analyzeHybrid(pr.pr_url);
       setReview(data);
-      // Persist result to backend so all users see it without re-running
-      await savePRReview(repoId, prId, data).catch(() => {});
-    } catch (e) {
-      alert("Analysis failed: " + e.message);
-    } finally {
       setReviewing(false);
+    } catch (e) {
+      if (e.status === 409) {
+        // Already running (started by us or another tab) — wait for it
+        // instead of erroring out or starting a duplicate.
+        startPolling();
+      } else {
+        setReviewing(false);
+        alert("Analysis failed: " + e.message);
+      }
     }
   }
 

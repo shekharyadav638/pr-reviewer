@@ -78,17 +78,20 @@ class Settings:
             label_many_commits_threshold=int(
                 os.getenv("LABEL_MANY_COMMITS_THRESHOLD", "10")
             ),
-            openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+            # .strip() on secrets — a stray trailing newline/space from a
+            # copy-pasted .env value turns into a malformed Authorization
+            # header that providers reject as "missing", not "invalid".
+            openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
             # LLM provider
             llm_provider=os.getenv("LLM_PROVIDER", "openai"),
-            llm_base_url=os.getenv("LLM_BASE_URL", ""),
-            llm_api_key=os.getenv("LLM_API_KEY", ""),
+            llm_base_url=os.getenv("LLM_BASE_URL", "").strip(),
+            llm_api_key=os.getenv("LLM_API_KEY", "").strip(),
             llm_model=os.getenv("LLM_MODEL", ""),
             # Embedding provider
             embedding_provider=os.getenv("EMBEDDING_PROVIDER", "openai"),
-            embedding_base_url=os.getenv("EMBEDDING_BASE_URL", ""),
-            embedding_api_key=os.getenv("EMBEDDING_API_KEY", ""),
+            embedding_base_url=os.getenv("EMBEDDING_BASE_URL", "").strip(),
+            embedding_api_key=os.getenv("EMBEDDING_API_KEY", "").strip(),
             embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
         )
 

@@ -11,7 +11,9 @@ async function apiRequest(method, endpoint, body) {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || `Request failed (${response.status})`);
+    const err = new Error(error.detail || `Request failed (${response.status})`);
+    err.status = response.status;
+    throw err;
   }
 
   return response.json();
@@ -126,6 +128,10 @@ export async function listBitbucketWorkspaces() {
 // ─── PR Review cache ────────────────────────────────
 export async function getPRReview(repoId, prId) {
   return apiRequest("GET", `/repos/${repoId}/prs/${prId}/review`);
+}
+
+export async function getPRReviewStatus(repoId, prId) {
+  return apiRequest("GET", `/repos/${repoId}/prs/${prId}/review-status`);
 }
 
 export async function savePRReview(repoId, prId, result) {

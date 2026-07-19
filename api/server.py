@@ -19,7 +19,7 @@ from api.schemas import (
     SourceEntry,
     SourceFileResponse,
 )
-from api.service import AnalysisService
+from api.service import AnalysisService, ReviewInProgress
 
 logging.basicConfig(
     level=logging.INFO,
@@ -113,12 +113,15 @@ def retrain_models():
     response_model=HybridAnalyzeResponse,
     responses={
         400: {"model": ErrorResponse},
+        409: {"model": ErrorResponse},
         500: {"model": ErrorResponse},
     },
 )
 def analyze_pr_hybrid(request: AnalyzeRequest):
     try:
         return service.analyze_hybrid(request.pr_url)
+    except ReviewInProgress as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -356,6 +359,14 @@ def save_pr_review_cache(repo_id: int, pr_id: int, request: dict):
         return {"status": "saved"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/repos/{repo_id}/prs/{pr_id}/review-status")
+def get_pr_review_status(repo_id: int, pr_id: int):
+    """'running' if a review for this PR is currently being computed (possibly
+    by another tab/user), else 'idle' — lets the frontend resume showing
+    progress after a navigation away instead of re-triggering a duplicate run."""
+    return service.get_pr_review_status(repo_id, pr_id)
 
 
 

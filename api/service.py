@@ -59,6 +59,10 @@ def _parse_json_list(value: str) -> list:
         return []
 
 
+class ReviewInProgress(Exception):
+    """Raised when a review for this PR is already being computed elsewhere."""
+
+
 class AnalysisService:
     def __init__(self) -> None:
         self._analyzer: PRAnalyzer | None = None
@@ -88,17 +92,50 @@ class AnalysisService:
         return self._to_response(report)
 
     def analyze_hybrid(self, pr_url: str) -> HybridAnalyzeResponse:
-        # Auto-sync the local clone so duplicate detection + graph use fresh code
+        from bitbucket.client import BitbucketClient
+        workspace, repo_slug, pr_id = BitbucketClient.parse_pr_url(pr_url)
+
+        store = self._repo_store()
+        record = store.get_repo_by_slug(workspace, repo_slug)
+
+        # Claim the review slot so a second click (or a stale tab) doesn't
+        # kick off a duplicate LLM run in parallel — the frontend polls
+        # get_review_status() instead while one is already in flight.
+        if record and not store.mark_review_started(record.id, pr_id):
+            raise ReviewInProgress(
+                "A review for this PR is already running — please wait for it to finish."
+            )
+
         try:
-            workspace, repo_slug, _ = __import__(
-                "bitbucket.client", fromlist=["BitbucketClient"]
-            ).BitbucketClient.parse_pr_url(pr_url)
-            self._auto_sync_clone(workspace, repo_slug)
-        except Exception:
-            pass  # sync is best-effort — analysis continues regardless
-        builder = self._get_hybrid_builder()
-        report: HybridReport = builder.build_report(pr_url)
-        return self._to_hybrid_response(report)
+            # Auto-sync the local clone so duplicate detection + graph use fresh code
+            try:
+                self._auto_sync_clone(workspace, repo_slug)
+            except Exception:
+                pass  # sync is best-effort — analysis continues regardless
+
+            builder = self._get_hybrid_builder()
+            report: HybridReport = builder.build_report(pr_url)
+            response = self._to_hybrid_response(report)
+
+            # Cache server-side, not just after the client awaits the response.
+            # This review can take a minute (LLM chunking, cloning, etc.) — if
+            # the user navigates away before it finishes, the fetch is
+            # abandoned and a client-side-only save never runs, so the
+            # finished result was silently thrown away and "Run Review"
+            # reappeared on the next visit.
+            if record:
+                try:
+                    store.save_pr_review(record.id, pr_id, response.model_dump())
+                except Exception:
+                    logger.exception("Failed to cache PR review server-side")
+
+            return response
+        finally:
+            if record:
+                store.mark_review_finished(record.id, pr_id)
+
+    def get_pr_review_status(self, repo_id: int, pr_id: int) -> dict:
+        return {"status": self._repo_store().get_review_status(repo_id, pr_id)}
 
     def get_cached_pr_review(self, repo_id: int, pr_id: int) -> dict | None:
         """Return the cached review result for a PR, or None if never analysed."""

@@ -70,7 +70,7 @@ class DuplicateDetector:
                 return self._collection_cache[key]
             try:
                 col = get_collection(workspace, repo_slug,
-                                     self.settings.openai_api_key,
+                                     self.settings,
                                      branch=branch)
                 self._collection_cache[key] = col
                 return col
@@ -82,7 +82,7 @@ class DuplicateDetector:
         if key not in self._collection_cache:
             try:
                 col = get_collection(workspace, repo_slug,
-                                     self.settings.openai_api_key)
+                                     self.settings)
                 self._collection_cache[key] = col
             except Exception as exc:
                 logger.warning("Could not load collection for %s: %s", key, exc)
@@ -109,8 +109,8 @@ class DuplicateDetector:
         file_contents: {filepath: source_code} for PR-changed files.
         Returns list of DuplicateWarning for any near-duplicate found.
         """
-        if not self.settings.openai_api_key:
-            logger.debug("No OPENAI_API_KEY — skipping duplicate detection")
+        if not self.settings.resolved_embedding_api_key:
+            logger.debug("No embedding API key configured — skipping duplicate detection")
             return []
 
         collection = self._get_collection(workspace, repo_slug, target_branch)

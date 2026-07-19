@@ -138,6 +138,14 @@ class RepoStore:
                     PRIMARY KEY (repo_id, pr_id)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pr_review_status (
+                    repo_id    INTEGER NOT NULL,
+                    pr_id      INTEGER NOT NULL,
+                    started_at TEXT    NOT NULL,
+                    PRIMARY KEY (repo_id, pr_id)
+                )
+            """)
 
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
@@ -440,4 +448,58 @@ class RepoStore:
         result = json.loads(row["result_json"])
         result["_reviewed_at"] = row["reviewed_at"]
         return result
+
+    # ------------------------------------------------------------------ #
+    # PR review in-progress tracking                                       #
+    # ------------------------------------------------------------------ #
+    # Stored in SQLite (not an in-process flag) since the API runs as
+    # multiple uvicorn workers — an in-memory set would only be visible to
+    # whichever worker happened to handle a given request.
+
+    REVIEW_STALE_AFTER_MINUTES = 15
+
+    def mark_review_started(self, repo_id: int, pr_id: int) -> bool:
+        """Atomically claim the review slot for (repo_id, pr_id).
+        Returns True if this call claimed it, False if one is already running.
+        A claim older than REVIEW_STALE_AFTER_MINUTES is treated as an
+        orphaned row from a crashed run and reclaimed."""
+        now = datetime.utcnow()
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                "SELECT started_at FROM pr_review_status WHERE repo_id=? AND pr_id=?",
+                (repo_id, pr_id),
+            ).fetchone()
+            if row:
+                age_minutes = (now - datetime.fromisoformat(row["started_at"])).total_seconds() / 60
+                if age_minutes < self.REVIEW_STALE_AFTER_MINUTES:
+                    return False
+            conn.execute(
+                """INSERT INTO pr_review_status (repo_id, pr_id, started_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(repo_id, pr_id) DO UPDATE SET started_at = excluded.started_at""",
+                (repo_id, pr_id, now.isoformat()),
+            )
+            return True
+
+    def mark_review_finished(self, repo_id: int, pr_id: int) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "DELETE FROM pr_review_status WHERE repo_id=? AND pr_id=?",
+                (repo_id, pr_id),
+            )
+
+    def get_review_status(self, repo_id: int, pr_id: int) -> str:
+        """'running' if a review for this PR is currently being computed
+        (and not stale), else 'idle'."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT started_at FROM pr_review_status WHERE repo_id=? AND pr_id=?",
+                (repo_id, pr_id),
+            ).fetchone()
+        if not row:
+            return "idle"
+        age_minutes = (
+            datetime.utcnow() - datetime.fromisoformat(row["started_at"])
+        ).total_seconds() / 60
+        return "running" if age_minutes < self.REVIEW_STALE_AFTER_MINUTES else "idle"
 
