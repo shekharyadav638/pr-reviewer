@@ -1061,6 +1061,12 @@ class AnalysisService:
             df.to_csv(dataset_path, index=False)
             logger.info("Cumulative dataset: %d PRs at %s", len(df), dataset_path)
 
+            # The dataset changed regardless of whether training below runs —
+            # PRAnalyzer caches it once at construction (for hotspot detection),
+            # so this worker won't see the new file until that cache is dropped.
+            self._analyzer = None
+            self._hybrid_builder = None
+
             y = df["needs_major_changes"].values.astype(int)
             if len(np.unique(y)) < 2:
                 logger.info(
@@ -1076,10 +1082,6 @@ class AnalysisService:
             trainer.train_and_evaluate(X, y)
             trainer.save(settings.model_output_dir)
             engineer.save(settings.model_output_dir)
-
-            # Hot-reload so the next review uses the new model immediately
-            self._analyzer = None
-            self._hybrid_builder = None
             logger.info(
                 "Auto-train complete. Best model: %s", trainer.best_model_name
             )

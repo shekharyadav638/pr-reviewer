@@ -52,6 +52,13 @@ CHUNK_SIZE = int(os.getenv("LLM_CHUNK_CHARS", "60000"))
 # read the live cap straight out of the error and re-split to fit under it,
 # rather than asking the user to keep re-guessing a number.
 _TOKEN_LIMIT_RE = re.compile(r"limit exceeded:\s*\d+\s*>\s*(\d+)")
+# Distinct 402 shape: the completion budget (max_tokens), not the prompt, is
+# what the account can't afford — "You requested up to 4096 tokens, but can
+# only afford 3770." Seen uniformly across every chunk regardless of size,
+# which means the account's remaining balance itself is the bottleneck, not
+# any one request's prompt length. Shrinking max_tokens to what's affordable
+# fixes this independently of the prompt-size retry above.
+_AFFORD_RE = re.compile(r"can only afford\s*(\d+)")
 _CHARS_PER_TOKEN = 3  # conservative — code/diff text runs closer to 3 than 4
 MAX_SPLIT_DEPTH = 6
 
@@ -130,6 +137,12 @@ class OpenAIReviewer:
             client_kwargs["base_url"] = base_url
         self.client = OpenAI(**client_kwargs)
 
+        # Once a 402 tells us the real affordable completion budget, remember
+        # it for the rest of this review — otherwise every one of an 18-chunk
+        # diff independently re-discovers the same ceiling via its own failed
+        # request first, doubling the wasted round-trips.
+        self._known_max_tokens = 4096
+
     def review_diff(self, diff_text: str,
                     pr_title: str = "",
                     pr_description: str = "",
@@ -166,6 +179,7 @@ class OpenAIReviewer:
         user_content = self._build_user_prompt(
             diff_chunk, pr_title, pr_description, context, extra_context
         )
+        max_tokens = self._known_max_tokens
 
         try:
             response = self.client.chat.completions.create(
@@ -175,15 +189,38 @@ class OpenAIReviewer:
                     {"role": "user", "content": user_content},
                 ],
                 temperature=0.2,
-                max_tokens=4096,
+                max_tokens=max_tokens,
             )
             raw = response.choices[0].message.content.strip()
             return self._parse_response(raw)
         except Exception as exc:
+            if _depth >= MAX_SPLIT_DEPTH:
+                logger.exception("OpenAI API call failed")
+                return LLMReviewResult(
+                    summary="LLM analysis failed due to an API error."
+                )
+
+            # Case 1: the account can't afford the completion budget we asked
+            # for — this hits every chunk equally regardless of prompt size,
+            # so just shrink max_tokens and retry the same chunk once.
+            afford = self._extract_afford_limit(exc)
+            if afford and afford < max_tokens:
+                self._known_max_tokens = max(256, afford)
+                logger.info(
+                    "Provider can only afford %d completion tokens (asked "
+                    "for %d) — retrying with max_tokens=%d for the rest of "
+                    "this review", afford, max_tokens, self._known_max_tokens,
+                )
+                return self._review_single(
+                    diff_chunk, pr_title, pr_description,
+                    context=context, extra_context=extra_context,
+                    _depth=_depth + 1,
+                )
+
+            # Case 2: the prompt itself is too large for the live cap — split
+            # and retry each half.
             live_cap = self._extract_token_limit(exc)
-            if live_cap and _depth < MAX_SPLIT_DEPTH and len(diff_chunk) > 500:
-                # Leave headroom for the system prompt + title/description,
-                # which share the same token budget as the diff.
+            if live_cap and len(diff_chunk) > 500:
                 safe_chars = max(500, live_cap * _CHARS_PER_TOKEN - 1000)
                 if safe_chars < len(diff_chunk):
                     pieces = [diff_chunk[i:i + safe_chars]
@@ -203,6 +240,7 @@ class OpenAIReviewer:
                         for i, piece in enumerate(pieces)
                     ]
                     return self._merge_results(results)
+
             logger.exception("OpenAI API call failed")
             return LLMReviewResult(
                 summary="LLM analysis failed due to an API error."
@@ -213,6 +251,13 @@ class OpenAIReviewer:
         """Pull the provider's current prompt-token cap out of a 402 error
         message like 'Prompt tokens limit exceeded: 14684 > 8344'."""
         m = _TOKEN_LIMIT_RE.search(str(exc))
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def _extract_afford_limit(exc: Exception) -> int | None:
+        """Pull the affordable completion-token budget out of a 402 error
+        like 'You requested up to 4096 tokens, but can only afford 3770'."""
+        m = _AFFORD_RE.search(str(exc))
         return int(m.group(1)) if m else None
 
     @staticmethod
