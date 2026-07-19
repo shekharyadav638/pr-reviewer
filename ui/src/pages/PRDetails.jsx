@@ -159,10 +159,18 @@ export default function PRDetails() {
         // Already running (started by us or another tab) — wait for it
         // instead of erroring out or starting a duplicate.
         startPolling();
-      } else {
-        setReviewing(false);
-        alert("Analysis failed: " + e.message);
+        return;
       }
+      // Long reviews outlive the HTTP connection (nginx 504, network drop)
+      // while the backend keeps working and caches the result. If it's
+      // still running server-side, keep waiting instead of reporting failure.
+      const { status } = await getPRReviewStatus(repoId, prId).catch(() => ({ status: 'idle' }));
+      if (status === 'running') {
+        startPolling();
+        return;
+      }
+      setReviewing(false);
+      alert("Analysis failed: " + e.message);
     }
   }
 
