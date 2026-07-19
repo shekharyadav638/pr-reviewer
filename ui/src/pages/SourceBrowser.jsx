@@ -1,7 +1,75 @@
 import { Icon } from '@iconify/react';
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { listBranches, browseSource, readSourceFile, syncRepo, getRepo, getSourceHeadCommit } from "../api/client";
+
+function BranchDropdown({ branches, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClickOutside(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [open]);
+
+  const filtered = useMemo(() => {
+    const term = query.trim().toLowerCase();
+    return branches.filter(b => !term || b.toLowerCase().includes(term));
+  }, [branches, query]);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 hover:bg-slate-100 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-slate-700 transition-colors"
+      >
+        <Icon icon="lucide:git-branch" className="text-slate-400 text-[14px]" />
+        {value || "Select branch"}
+        <Icon icon="lucide:chevron-down" className="text-slate-400 text-[12px]" />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-full mt-1.5 w-64 bg-white border border-slate-200 rounded-lg shadow-lg z-30 overflow-hidden">
+          <div className="p-2 border-b border-slate-100">
+            <div className="relative">
+              <Icon icon="lucide:search" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-[12px]" />
+              <input
+                autoFocus
+                type="text"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder="Find a branch"
+                className="w-full pl-7 pr-2 py-1.5 bg-slate-50 border border-slate-200 focus:border-brand-400 rounded-md text-[13px] outline-none"
+              />
+            </div>
+          </div>
+          <div className="max-h-64 overflow-y-auto py-1">
+            {filtered.length === 0 && (
+              <div className="px-3 py-2 text-[13px] text-slate-400">No matching branches</div>
+            )}
+            {filtered.map(b => (
+              <button
+                key={b}
+                onClick={() => { onChange(b); setOpen(false); setQuery(""); }}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-[13px] text-left hover:bg-slate-50 transition-colors ${
+                  b === value ? 'text-brand-700 font-medium bg-brand-50/60' : 'text-slate-700'
+                }`}
+              >
+                <Icon icon="lucide:check" className={`text-[12px] shrink-0 ${b === value ? 'opacity-100' : 'opacity-0'}`} />
+                <span className="truncate">{b}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 const CODE_EXTENSIONS = new Set(["py", "js", "jsx", "ts", "tsx", "go", "java", "sh", "rb", "php"]);
 
@@ -184,16 +252,7 @@ export default function SourceBrowser({ repo: propRepo }) {
           <h1 className="text-xl font-bold text-slate-900 tracking-tight">Source</h1>
 
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
-              <Icon icon="lucide:git-branch" className="text-slate-400 text-[14px]" />
-              <select
-                value={branch}
-                onChange={e => handleBranchChange(e.target.value)}
-                className="bg-transparent text-[13px] font-medium text-slate-700 outline-none cursor-pointer"
-              >
-                {branches.map(b => <option key={b} value={b}>{b}</option>)}
-              </select>
-            </div>
+            <BranchDropdown branches={branches} value={branch} onChange={handleBranchChange} />
 
             <button
               onClick={handleSync}

@@ -9,14 +9,15 @@ This document outlines the end-to-end lifecycle of how PR Guardian processes you
 When you connect a repository (via **Browse Repositories** in the UI):
 
 1. **API Call:** The backend records the Bitbucket workspace/repo and its git URL in SQLite (`data/repos.db`).
-2. **Branch discovery:** It calls the Bitbucket API for the full branch list, then filters it down to **long-lived environment branches only** — see `_is_main_branch()` in `api/service.py`:
-   - Allowed names: `master`, `main`, `dev`, `develop`, `stage`, `staging`, `production`, `prod`, `release`, `qa`, `uat` (case-insensitive).
+2. **Branch discovery:** It calls the Bitbucket API for the *full* branch list (paginated to completion — repos with 500+ ticket branches are common, so a low page cap could silently cut off the real main branch), then filters it down to **long-lived environment branches only** — see `_is_main_branch()` in `api/service.py`. It matches by keyword, not a fixed exact-name list, so naming variations across teams are all caught without hand-listing every convention:
+   - `master`, `main`, `qa`, `uat`, `release` match as a whole token only (too common as substrings of unrelated words — e.g. "maintenance", "domain" — to match as a prefix).
+   - `dev`, `stag`, `prod` match as a token *prefix*, so `develop`, `development`, `stage`, `staging`, `production`, `pre-prod`, `prod_copy`, `production_vienna`, `release-production` all count.
    - Anything containing a `/` is rejected (covers `DF-754/phase-2-development`, `feature/x`, `hotfix/x`).
-   - Anything matching a `feature|feat|fix|hotfix|bugfix|chore|task/` prefix is rejected even without a slash-namespace.
    - Anything shaped like a bare ticket ID (`DF-754-...`) is rejected.
 3. **Why:** Feature/ticket branches are always cut from one of the branches above, so they contain no code that isn't already covered by indexing the parent branch. Indexing every branch a team creates would duplicate the same codebase dozens of times over and burn disk + embedding cost for zero benefit.
 4. Each matching branch gets its own **sparse shallow clone** (`git clone --depth 1 --filter=blob:none --sparse`) into `data/clones/<workspace>_<repo>__<branch>/`, so `develop` and `stage` never share files on disk.
 5. Binaries, `node_modules`, `dist`, lockfiles, etc. are excluded from the sparse checkout — only source files are pulled down.
+6. **Pruning:** every re-index run deletes any previously cloned/indexed branch's clone + ChromaDB directory that no longer matches the filter above — this cleans up ticket-branch clutter left behind by earlier runs (e.g. before this filter existed) instead of letting it accumulate on disk forever.
 
 ---
 

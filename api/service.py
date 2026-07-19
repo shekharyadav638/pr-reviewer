@@ -24,24 +24,31 @@ logger = logging.getLogger(__name__)
 # Only long-lived environment branches get cloned/indexed — feature/ticket
 # branches are always cut from one of these, so indexing them separately is
 # pure duplication and burns disk/embedding cost for no benefit.
-MAIN_BRANCH_NAMES = {
-    "master", "main", "dev", "develop", "stage", "staging",
-    "production", "prod", "release", "qa", "uat",
-}
-# Ticket branches: "DF-754-...", or namespaced "DF-754/...", "feature/...",
-# "hotfix/...", "fix/...", "bugfix/...", "chore/...", "task/..."
+#
+# Matched by keyword, not an exact name list, so naming variations across
+# teams — "pre-prod", "prod_copy", "production_vienna", "release-production",
+# "development" — all count without hand-listing every convention.
+# "main"/"master"/"qa"/"uat"/"release" match only as a whole token (too
+# common as substrings of unrelated words, e.g. "maintenance", "domain");
+# "dev"/"stag"/"prod" match as a token prefix to also catch
+# "develop(ment)", "stag(e/ing)", "product(ion)".
+_MAIN_EXACT_TOKENS = {"master", "main", "qa", "uat", "release"}
+_MAIN_PREFIX_TOKENS = ("dev", "stag", "prod")
+# Bare ticket branches: "DF-754-...". Namespaced ones ("DF-754/...",
+# "feature/...", "hotfix/...") are already excluded by the "/" check below.
 _TICKET_ID_RE = re.compile(r"^[a-z]{2,10}-\d+", re.IGNORECASE)
-_WORKFLOW_PREFIX_RE = re.compile(
-    r"^(feature|feat|fix|hotfix|bugfix|chore|task)/", re.IGNORECASE
-)
 
 
 def _is_main_branch(name: str) -> bool:
     """True only for long-lived environment branches, never ticket/feature work."""
     n = name.strip().lower()
-    if "/" in n or _WORKFLOW_PREFIX_RE.match(n) or _TICKET_ID_RE.match(n):
+    if "/" in n or _TICKET_ID_RE.match(n):
         return False
-    return n in MAIN_BRANCH_NAMES
+    tokens = re.split(r"[-_.]", n)
+    return any(
+        t in _MAIN_EXACT_TOKENS or t.startswith(_MAIN_PREFIX_TOKENS)
+        for t in tokens if t
+    )
 
 
 def _parse_json_list(value: str) -> list:
@@ -234,7 +241,7 @@ class AnalysisService:
 
     def start_index_repo(self, repo_id: int) -> dict:
         """
-        Full pipeline (background) for the main branches only (see MAIN_BRANCHES):
+        Full pipeline (background) for the main branches only (see _is_main_branch):
           For each matching branch fetched from Bitbucket:
             1. Sparse-shallow clone
             2. Build AST graph
