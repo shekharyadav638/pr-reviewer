@@ -34,12 +34,11 @@ function BranchDropdown({ branches, value, onChange }) {
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full mt-1.5 w-64 bg-white border border-slate-200 rounded-lg shadow-lg z-30 overflow-hidden">
+        <div className="absolute right-0 top-full mt-1.5 w-64 max-w-[calc(100vw-2rem)] bg-white border border-slate-200 rounded-lg shadow-lg z-30 overflow-hidden">
           <div className="p-2 border-b border-slate-100">
             <div className="relative">
               <Icon icon="lucide:search" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-[12px]" />
               <input
-                autoFocus
                 type="text"
                 value={query}
                 onChange={e => setQuery(e.target.value)}
