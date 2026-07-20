@@ -200,12 +200,9 @@ class OpenAIReviewer:
                     summary="LLM analysis failed due to an API error."
                 )
 
-            # Case 1: the account can't afford the completion budget we asked
-            # for — this hits every chunk equally regardless of prompt size,
-            # so just shrink max_tokens and retry the same chunk once.
             afford = self._extract_afford_limit(exc)
             if afford and afford < max_tokens:
-                self._known_max_tokens = max(256, afford)
+                self._known_max_tokens = afford
                 logger.info(
                     "Provider can only afford %d completion tokens (asked "
                     "for %d) — retrying with max_tokens=%d for the rest of "
