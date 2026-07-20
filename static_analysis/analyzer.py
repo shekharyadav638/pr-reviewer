@@ -57,6 +57,12 @@ class StaticAnalysisResult:
 
 
 class StaticAnalyzer:
+    def __init__(self):
+        # Cached across calls (this instance lives for the process's
+        # lifetime via HybridReportBuilder) so we don't re-spawn
+        # `eslint --version` on every single PR review.
+        self._eslint_major: int | None = None
+
     def analyze_files(self, changed_files: list[str],
                       file_contents: dict[str, str]) -> StaticAnalysisResult:
         """Run static analysis on changed files.
@@ -177,18 +183,99 @@ class StaticAnalyzer:
                     tool="pylint",
                 ))
 
+    def _get_eslint_major(self) -> int | None:
+        if self._eslint_major is not None:
+            return self._eslint_major
+        try:
+            proc = subprocess.run(
+                ["eslint", "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            self._eslint_major = int(proc.stdout.strip().lstrip("v").split(".")[0])
+        except Exception:
+            logger.warning("Could not determine eslint version")
+            return None
+        return self._eslint_major
+
+    @staticmethod
+    def _write_eslint_config(tmpdir: str, major: int) -> str:
+        """`--no-eslintrc` alone disables project config *without enabling
+        any rules* — ESLint has no rules on by default, so every run
+        silently reports zero findings regardless of code quality. Write an
+        explicit baseline config instead, so linting actually has a
+        ruleset to check against.
+
+        ESLint 9+ dropped eslintrc entirely for flat config, and
+        `eslint:recommended` there requires the separate `@eslint/js`
+        package (not guaranteed present on a bare `npm install -g eslint`)
+        — so the flat-config path hand-enables core rules directly instead
+        of depending on that package.
+        """
+        if major >= 9:
+            # `globals` must be listed explicitly (no `env` shorthand in flat
+            # config) — otherwise no-undef flags console/window/process/etc.
+            # as undefined on every single file, flooding reviews with
+            # false positives instead of real findings.
+            common_globals = [
+                "console", "window", "document", "navigator", "location",
+                "history", "fetch", "localStorage", "sessionStorage",
+                "setTimeout", "clearTimeout", "setInterval", "clearInterval",
+                "alert", "prompt", "confirm", "Promise", "process",
+                "require", "module", "exports", "global", "__dirname",
+                "__filename", "Buffer",
+            ]
+            globals_js = ", ".join(f"{g}: 'readonly'" for g in common_globals)
+            config_path = os.path.join(tmpdir, "eslint.config.mjs")
+            with open(config_path, "w") as f:
+                f.write(
+                    "export default [{\n"
+                    "  languageOptions: { ecmaVersion: 'latest', sourceType: 'module',"
+                    " parserOptions: { ecmaFeatures: { jsx: true } },\n"
+                    f"    globals: {{ {globals_js} }} }},\n"
+                    "  rules: {\n"
+                    "    'no-undef': 'error', 'no-unused-vars': 'warn',\n"
+                    "    'no-dupe-keys': 'error', 'no-dupe-args': 'error',\n"
+                    "    'no-unreachable': 'error', 'no-const-assign': 'error',\n"
+                    "    'no-dupe-class-members': 'error', 'no-fallthrough': 'warn',\n"
+                    "    'no-self-assign': 'error', 'no-self-compare': 'warn',\n"
+                    "    'no-empty': 'warn', 'no-extra-boolean-cast': 'warn',\n"
+                    "    'use-isnan': 'error', 'valid-typeof': 'error',\n"
+                    "  },\n"
+                    "}];\n"
+                )
+        else:
+            config_path = os.path.join(tmpdir, ".eslintrc.json")
+            with open(config_path, "w") as f:
+                json.dump({
+                    "extends": ["eslint:recommended"],
+                    "parserOptions": {
+                        "ecmaVersion": "latest", "sourceType": "module",
+                        "ecmaFeatures": {"jsx": True},
+                    },
+                    "env": {"browser": True, "node": True, "es2021": True},
+                }, f)
+        return config_path
+
     def _run_eslint(self, files: dict[str, str],
                     result: StaticAnalysisResult) -> None:
+        major = self._get_eslint_major()
+        if major is None:
+            result.tools_unavailable.append("eslint")
+            return
         result.tools_run.append("eslint")
+
         with tempfile.TemporaryDirectory() as tmpdir:
             file_map = self._write_temp_files(files, tmpdir)
             temp_paths = list(file_map.keys())
+            config_path = self._write_eslint_config(tmpdir, major)
+
+            cmd = ["eslint", "--format=json", "--config", config_path]
+            cmd += ["--no-config-lookup"] if major >= 9 else ["--no-eslintrc"]
+            cmd += temp_paths
 
             try:
                 proc = subprocess.run(
-                    ["eslint", "--format=json", "--no-eslintrc",
-                     *temp_paths],
-                    capture_output=True, text=True, timeout=60,
+                    cmd, capture_output=True, text=True, timeout=60,
                     cwd=tmpdir,
                 )
             except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -198,6 +285,10 @@ class StaticAnalyzer:
             try:
                 eslint_output = json.loads(proc.stdout) if proc.stdout else []
             except json.JSONDecodeError:
+                logger.warning(
+                    "eslint returned non-JSON output (exit %d): %s",
+                    proc.returncode, proc.stderr[:300],
+                )
                 return
 
             for file_result in eslint_output:
