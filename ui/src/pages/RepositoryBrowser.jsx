@@ -2,6 +2,7 @@ import { Icon } from '@iconify/react';
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { listBitbucketRepos, refreshBitbucketRepos, addRepo, indexRepo, listRepos } from '../api/client';
+import Toast from '../components/Toast';
 
 export default function RepositoryBrowser() {
   const [repos, setRepos] = useState([]);
@@ -11,6 +12,7 @@ export default function RepositoryBrowser() {
   const [search, setSearch] = useState('');
   const [selectedUrls, setSelectedUrls] = useState(new Set());
   const [connecting, setConnecting] = useState(false);
+  const [toast, setToast] = useState(null);
   
   const navigate = useNavigate();
 
@@ -81,7 +83,7 @@ export default function RepositoryBrowser() {
       }
     } catch (err) {
       console.error("Failed to connect repos:", err);
-      alert("Failed to connect: " + err.message);
+      setToast({ message: "Failed to connect: " + err.message, type: 'error' });
     } finally {
       setConnecting(false);
     }
@@ -94,6 +96,8 @@ export default function RepositoryBrowser() {
 
   return (
     <>
+      <Toast message={toast?.message} type={toast?.type} onDismiss={() => setToast(null)} />
+
       {/* Decorative Background Element */}
       <div className="absolute top-0 inset-x-0 h-64 bg-gradient-to-b from-slate-100 to-transparent pointer-events-none z-0"></div>
 

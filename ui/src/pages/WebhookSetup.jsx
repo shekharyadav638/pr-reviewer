@@ -1,11 +1,13 @@
 import { Icon } from '@iconify/react';
 import { useState, useEffect } from 'react';
 import { listRepos, registerWebhook } from '../api/client';
+import Toast from '../components/Toast';
 
 export default function WebhookSetup() {
   const [repos, setRepos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [registering, setRegistering] = useState(null);
+  const [toast, setToast] = useState(null);
 
   // You can set the host manually or dynamically
   const webhookUrl = `${window.location.origin}/webhook/bitbucket`;
@@ -29,16 +31,16 @@ export default function WebhookSetup() {
     try {
       const response = await registerWebhook(repoId);
       if (response.status === 'already_registered') {
-        alert("Webhook is already registered for this repository.");
+        setToast({ message: "Webhook is already registered for this repository.", type: 'success' });
       } else if (response.status === 'permission_denied') {
-        alert("Permission Denied: " + response.message);
+        setToast({ message: "Permission Denied: " + response.message, type: 'error' });
       } else if (response.status === 'error') {
-        alert("Error: " + response.message);
+        setToast({ message: "Error: " + response.message, type: 'error' });
       } else {
-        alert("Webhook successfully registered!");
+        setToast({ message: "Webhook successfully registered!", type: 'success' });
       }
     } catch (err) {
-      alert("Failed to register webhook: " + err.message);
+      setToast({ message: "Failed to register webhook: " + err.message, type: 'error' });
     } finally {
       setRegistering(null);
     }
@@ -46,6 +48,7 @@ export default function WebhookSetup() {
 
   return (
     <>
+      <Toast message={toast?.message} type={toast?.type} onDismiss={() => setToast(null)} />
       <div className="absolute top-0 inset-x-0 h-64 bg-gradient-to-b from-slate-100 to-transparent pointer-events-none z-0"></div>
 
       <header className="px-8 py-6 border-b border-slate-200 bg-white/80 backdrop-blur-md shrink-0 z-20 relative">

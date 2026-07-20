@@ -175,11 +175,11 @@ class StaticAnalyzer:
                 severity = "error" if item.get("type") == "error" else "warning"
                 result.issues.append(StaticIssue(
                     file=original_path,
-                    line=item.get("line", 0),
-                    column=item.get("column", 0),
+                    line=item.get("line") or 0,
+                    column=item.get("column") or 0,
                     severity=severity,
-                    rule=item.get("message-id", item.get("symbol", "")),
-                    message=item.get("message", ""),
+                    rule=item.get("message-id") or item.get("symbol") or "",
+                    message=item.get("message") or "",
                     tool="pylint",
                 ))
 
@@ -296,13 +296,19 @@ class StaticAnalyzer:
                 original_path = file_map.get(temp_path, temp_path)
                 for msg in file_result.get("messages", []):
                     sev = msg.get("severity", 1)
+                    # dict.get(k, default) only falls back when the key is
+                    # MISSING — ESLint always includes "ruleId" but sets it
+                    # to null for fatal parse errors (e.g. real TypeScript
+                    # syntax, which plain ESLint's parser can't read), so
+                    # `.get("ruleId", "")` still returns None here and broke
+                    # the (non-optional) API schema downstream.
                     result.issues.append(StaticIssue(
                         file=original_path,
-                        line=msg.get("line", 0),
-                        column=msg.get("column", 0),
+                        line=msg.get("line") or 0,
+                        column=msg.get("column") or 0,
                         severity="error" if sev == 2 else "warning",
-                        rule=msg.get("ruleId", ""),
-                        message=msg.get("message", ""),
+                        rule=msg.get("ruleId") or "parse-error",
+                        message=msg.get("message") or "",
                         tool="eslint",
                     ))
 

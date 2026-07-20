@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { getRepo, getRepoPRs, analyzeHybrid, postReviewComments, getPRReview, getPRReviewStatus, getPRDiff, postPRComment } from '../api/client';
 import Spinner from '../components/Spinner';
+import Toast from '../components/Toast';
 import { parseDiff, FileDiff } from '../components/DiffViewer';
 import FileTree from '../components/FileTree';
 
@@ -37,6 +38,7 @@ export default function PRDetails() {
   
   const [posting, setPosting] = useState(false);
   const [postResult, setPostResult] = useState(null);
+  const [toast, setToast] = useState(null);
 
   // Accordion states
   const [expandedSection, setExpandedSection] = useState('static');
@@ -174,7 +176,7 @@ export default function PRDetails() {
         return;
       }
       setReviewing(false);
-      alert("Analysis failed: " + e.message);
+      setToast({ message: "Analysis failed: " + e.message, type: 'error' });
     }
   }
 
@@ -185,7 +187,7 @@ export default function PRDetails() {
       const result = await postReviewComments(repo.id, pr.pr_id, review);
       setPostResult(result);
     } catch (e) {
-      alert(`Failed to post review comments: ${e.message}`);
+      setToast({ message: `Failed to post review comments: ${e.message}`, type: 'error' });
     } finally {
       setPosting(false);
     }
@@ -196,7 +198,7 @@ export default function PRDetails() {
       await postPRComment(repo.id, pr.pr_id, text, filepath, line);
       setReviewComments(prev => [...prev, { filepath, line, text }]);
     } catch (e) {
-      alert(`Failed to post comment: ${e.message}`);
+      setToast({ message: `Failed to post comment: ${e.message}`, type: 'error' });
     }
   }
 
@@ -281,6 +283,8 @@ export default function PRDetails() {
 
   return (
     <div className="flex flex-col h-full bg-[#f8fafc]">
+      <Toast message={toast?.message} type={toast?.type} onDismiss={() => setToast(null)} />
+
       {/* PR Header (Sticky) */}
       <header className="bg-white border-b border-slate-200 px-6 py-5 flex-shrink-0 z-20 shadow-sm">
         
